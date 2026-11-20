@@ -12,6 +12,14 @@ namespace DbStudio.Providers;
 public sealed partial class OracleProvider
 {
     // Position 0 is a function's return value. A parameterless procedure has one placeholder row without a data type.
+    protected override string PrimaryKeySql => """
+        SELECT cc.column_name
+        FROM all_constraints c
+        JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+        WHERE c.owner = :schema AND c.table_name = :name AND c.constraint_type = 'P'
+        ORDER BY cc.position
+        """;
+
     protected override string RoutineParametersSql => """
         SELECT position,
                NVL(argument_name, 'RETURN'),

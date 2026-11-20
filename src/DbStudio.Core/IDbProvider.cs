@@ -17,6 +17,10 @@ public interface IDbProvider
     /// (export of large tables). Runs on its own connection.</summary>
     Task StreamAsync(ConnectionProfile objProfile, string strSql, IRowSink objSink, CancellationToken objCancelToken);
 
+    /// <summary>Which table and column each result column of a SELECT comes from, and the primary keys of those tables,
+    /// so the grid can write edits back. The statement is described, not run.</summary>
+    Task<ResultOrigin> DescribeResultAsync(ConnectionProfile objProfile, string strSql, CancellationToken objCancelToken);
+
     /// <summary>Opens a connection that stays open for one editor tab (transaction, session settings).</summary>
     Task<IDbSession> OpenSessionAsync(ConnectionProfile objProfile, CancellationToken objCancelToken);
 

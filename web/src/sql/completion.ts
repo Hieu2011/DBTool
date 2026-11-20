@@ -12,6 +12,7 @@
 import type * as Monaco from 'monaco-editor';
 import type { DbKind, SchemaMetadata, TableMeta } from '../types';
 import type { AnalyzeRequest, AnalyzeResponse, ParserDialect, ScopeTable, SqlAnalysis } from './analysis';
+import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';
 import { derivedTables, type DerivedTable } from './derived';
 import { qualifiedName, quoteIdent } from './identifiers';
 import ParserWorker from './parser.worker?worker';
@@ -48,6 +49,46 @@ export const unquote = (strValue: string) => strValue.replace(/"/g, '').toLowerC
 const dicRegistry = new Map<string, () => SchemaMetadata | undefined>();
 
 const dialectOf = (objModel: Monaco.editor.ITextModel): ParserDialect => (objModel.getLanguageId() === 'pgsql' ? 'pgsql' : 'oracle');
+
+// Oracle lists one schema at a time: how an editor loads another one, and the schemas that failed (not asked again).
+type SchemaLoader = (strSchema: string) => Promise<SchemaMetadata>;
+const dicSchemaLoaders = new Map<string, SchemaLoader>();
+const dicFailedSchemas = new WeakMap<SchemaLoader, Set<string>>();
+
+/** Lets autocomplete load a schema the statement names, so its tables are suggested without opening it in the tree first. */
+export function schemaLoaderFor(objModel: Monaco.editor.ITextModel, fnLoad: SchemaLoader) {
+  dicSchemaLoaders.set(objModel.uri.toString(), fnLoad);
+  return () => dicSchemaLoaders.delete(objModel.uri.toString());
+}
+
+/**
+ * The metadata with every schema loaded that the statement at the cursor names (`tms.` being typed, FROM tms.x):
+ * each is loaded once, on first use.
+ */
+async function withNamedSchemas(objModel: Monaco.editor.ITextModel, objPosition: Monaco.Position, objMeta: SchemaMetadata): Promise<SchemaMetadata> {
+  const fnLoad = dicSchemaLoaders.get(objModel.uri.toString());
+  if (!fnLoad || !objMeta.schemas) return objMeta;
+  const objStatement = statementAtCursor(objModel.getValue(), objModel.getOffsetAt(objPosition), dialectOf(objModel));
+  const strLine = objModel.getLineContent(objPosition.lineNumber).slice(0, objPosition.column - 1);
+  const arrNames = [
+    /("?[\w$#]+"?)\s*\.\s*"?[\w$#]*$/.exec(strLine)?.[1],
+    ...[...(objStatement?.sql ?? '').matchAll(TABLE_REF)].map(arrMatch => (arrMatch[1].includes('.') ? arrMatch[1].split('.')[0] : undefined)),
+  ].filter((strName): strName is string => !!strName).map(unquote);
+
+  let hsFailed = dicFailedSchemas.get(fnLoad);
+  if (!hsFailed) dicFailedSchemas.set(fnLoad, hsFailed = new Set());
+  let objLatest = objMeta;
+  for (const strName of new Set(arrNames)) {
+    const strSchema = objMeta.schemas.find(strItem => strItem.toLowerCase() === strName);
+    if (!strSchema || objLatest.loadedSchemas?.includes(strSchema) || hsFailed.has(strSchema)) continue;
+    try {
+      objLatest = await fnLoad(strSchema);
+    } catch {
+      hsFailed.add(strSchema);
+    }
+  }
+  return objLatest;
+}
 
 /** Metadata of the connection the model's editor is bound to (other completion providers use it too). */
 export const metadataOf = (objModel: Monaco.editor.ITextModel) => dicRegistry.get(objModel.uri.toString())?.();
@@ -149,6 +190,9 @@ function scopeEntry(arrScope: ScopeTable[], strQualifier: string) {
     ?? arrScope.find(objItem => unquote(objItem.ref.split('.').pop() ?? '') === strQualifier);
 }
 
+// Short words an alias made of initials must not be.
+const ALIAS_RESERVED = new Set(['AS', 'AT', 'BY', 'DO', 'GO', 'IF', 'IN', 'IS', 'NO', 'OF', 'ON', 'OR', 'TO', 'ADD', 'ALL', 'AND', 'ANY', 'ASC', 'END', 'FOR', 'NOT', 'ROW', 'SET', 'TOP']);
+
 let boolRegistered = false;
 
 export function registerSqlCompletion(objMonaco: typeof Monaco) {
@@ -158,7 +202,9 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
   const objProvider: Monaco.languages.CompletionItemProvider = {
     triggerCharacters: ['.', ' '],
     async provideCompletionItems(objModel, objPosition, _objContext, objToken) {
-      const objMeta = dicRegistry.get(objModel.uri.toString())?.();
+      const objKnown = dicRegistry.get(objModel.uri.toString())?.();
+      const objMeta = objKnown && await withNamedSchemas(objModel, objPosition, objKnown);
+      if (objToken.isCancellationRequested) return { suggestions: [] };
       const objWord = objModel.getWordUntilPosition(objPosition);
       const objRange = {
         startLineNumber: objPosition.lineNumber,
@@ -167,19 +213,24 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
         endColumn: objWord.endColumn,
       };
       const objKind = objMonaco.languages.CompletionItemKind;
-      const keywordItems = (arrWords: string[] = KEYWORDS) => arrWords.map(strKeyword => ({
+      // Keywords in the case each database's own style uses: lower for PostgreSQL, upper for Oracle.
+      const boolLower = dialectOf(objModel) === 'pgsql';
+      const keywordItems = (arrWords: string[] = KEYWORDS) => arrWords.map(strWord => (boolLower ? strWord.toLowerCase() : strWord.toUpperCase())).map(strKeyword => ({
         label: strKeyword, kind: objKind.Keyword, insertText: strKeyword, range: objRange, sortText: '3' + strKeyword,
       }));
       // The user's snippets, offered by prefix wherever a statement can start or continue.
-      const snippetItems = () => getSnippets().filter(objSnippet => objSnippet.prefix).map(objSnippet => ({
-        label: objSnippet.prefix,
+      // Where a statement starts (nothing but comments since the last `;`) the snippets lead the list; elsewhere they
+      // come last, under the names that fit the place.
+      const strLead = objModel.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: objPosition.lineNumber, endColumn: objWord.startColumn });
+      const boolStatementStart = strLead.slice(strLead.lastIndexOf(';') + 1).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '').trim() === '';
+      const snippetItems = () => [...getSnippets().filter(objSnippet => objSnippet.prefix), ...builtinSnippets(dialectOf(objModel), getSnippets())].map(objSnippet => ({
+        label: snippetLabel(objSnippet),
         kind: objKind.Snippet,
-        detail: objSnippet.name,
-        documentation: objSnippet.body,
+        documentation: { value: '```sql\n' + snippetCode(objSnippet.body) + '\n```' },
         insertText: objSnippet.body,
         insertTextRules: objMonaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
         range: objRange,
-        sortText: '0' + objSnippet.prefix,
+        sortText: (boolStatementStart ? '0' : '8') + objSnippet.prefix,
       }));
       if (!objMeta) return { suggestions: [...snippetItems(), ...keywordItems()] };
 
@@ -188,37 +239,68 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
       const strDialect = dialectOf(objModel);
       const strDbKind: DbKind = strDialect === 'pgsql' ? 'PostgreSql' : 'Oracle';
       const strDefaultSchema = strDbKind === 'Oracle' ? objMeta.loadedSchemas?.[0] : 'public';
+      // Right after FROM / JOIN a picked table also gets an alias, its initials (MD_DATASOURCE -> MD), as dbForge does.
+      // Not when something that could be an alias already follows.
+      const aliasFor = (objTable: TableMeta) => {
+        if (!/\b(?:from|join)\s+(?:"?[\w$#]+"?\s*\.\s*)?$/i.test(strTextBefore)) return '';
+        const strAfter = objModel.getLineContent(objPosition.lineNumber).slice(objWord.endColumn - 1);
+        if (!/^\s*(?:$|[;)]|(?:where|join|inner|left|right|full|cross|on|order|group)\b)/i.test(strAfter)) return '';
+        const hsTaken = new Set(tablesInQuery(objMeta, objStatement?.sql ?? strSql).keys());
+        const strBase = objTable.name.split(/[^A-Za-z0-9]+/).filter(Boolean).map(strPart => strPart[0]).join('') || 'T';
+        let strAlias = strBase;
+        for (let intNext = 1; hsTaken.has(strAlias.toLowerCase()) || NOT_ALIAS.has(strAlias.toLowerCase()) || ALIAS_RESERVED.has(strAlias.toUpperCase()) || /^\d/.test(strAlias); intNext++)
+          strAlias = `${/^\d/.test(strBase) ? 'T' : strBase}${intNext}`;
+        return ` ${strAlias}`;
+      };
       const tableItem = (objTable: TableMeta, boolQualify = true) => ({
         label: objTable.name,
         kind: objTable.type === 'VIEW' ? objKind.Interface : objKind.Struct,
         detail: `${objTable.type.toLowerCase()} ${objTable.schema}`,
-        insertText: boolQualify && objTable.schema !== strDefaultSchema
+        insertText: (boolQualify && objTable.schema !== strDefaultSchema
           ? qualifiedName(objTable.schema, objTable.name, strDbKind)
-          : quoteIdent(objTable.name, strDbKind),
+          : quoteIdent(objTable.name, strDbKind)) + aliasFor(objTable),
         range: objRange,
         sortText: '2' + objTable.name,
       });
-      const columnItems = (objTable: TableMeta) => objTable.columns.map((objColumn, intIndex) => ({
+      // strAlias: the table's alias in this statement; the column is then written alias.column.
+      const columnItems = (objTable: TableMeta, strAlias?: string) => objTable.columns.map((objColumn, intIndex) => ({
         label: objColumn.name,
         kind: objKind.Field,
-        detail: `${objColumn.dataType}  ${objTable.name}`,
-        insertText: objColumn.name,
+        detail: `${objColumn.dataType}  ${strAlias ? `${strAlias} · ` : ''}${objTable.name}`,
+        insertText: strAlias ? `${strAlias}.${objColumn.name}` : objColumn.name,
+        filterText: objColumn.name,
         range: objRange,
         sortText: '1' + String(intIndex).padStart(4, '0'),
       }));
+      // PostgreSQL takes no alias on the column an UPDATE sets.
+      const aliasAllowed = () => !(strDialect === 'pgsql' && /\bset\b(?:(?!\bwhere\b)[^;])*$/i.test(strTextBefore));
+      /** Columns of the tables the text names (FROM / JOIN / UPDATE / INTO), each with its table's alias when it has one. */
+      const columnsOfTables = (strText: string) => {
+        const dicAlias = new Map<TableMeta, string | undefined>();
+        for (const arrMatch of strText.matchAll(TABLE_REF)) {
+          const objTable = findTable(objMeta, arrMatch[1]);
+          if (!objTable) continue;
+          const strAlias = arrMatch[2] && !NOT_ALIAS.has(unquote(arrMatch[2])) && aliasAllowed() ? arrMatch[2] : undefined;
+          if (!dicAlias.get(objTable)) dicAlias.set(objTable, strAlias);
+        }
+        return [...dicAlias].flatMap(([objTable, strAlias]) => columnItems(objTable, strAlias));
+      };
       // Output columns of a subquery / CTE: names only, the parser does not know their types.
-      const derivedItems = (objEntry: ScopeTable) => (objEntry.columns ?? []).map((strColumn, intIndex) => ({
+      const derivedItems = (objEntry: ScopeTable, boolAlias = false) => (objEntry.columns ?? []).map((strColumn, intIndex) => ({
         label: strColumn,
         kind: objKind.Field,
         detail: objEntry.alias ?? objEntry.ref,
-        insertText: strColumn,
+        insertText: boolAlias && objEntry.alias ? `${objEntry.alias}.${strColumn}` : strColumn,
+        filterText: strColumn,
         range: objRange,
         sortText: '1' + String(intIndex).padStart(4, '0'),
       }));
-      const scopeColumns = (objEntry: ScopeTable) => {
-        if (objEntry.columns) return derivedItems(objEntry);
+      // boolAlias false: the qualifier is already typed (`x.`).
+      const scopeColumns = (objEntry: ScopeTable, boolAlias = true) => {
+        const boolPrefix = boolAlias && aliasAllowed();
+        if (objEntry.columns) return derivedItems(objEntry, boolPrefix);
         const objTable = findTable(objMeta, objEntry.ref);
-        return objTable ? columnItems(objTable) : [];
+        return objTable ? columnItems(objTable, boolPrefix ? objEntry.alias : undefined) : [];
       };
       const routineItems = (arrTypes: string[], strSchema?: string) => objMeta.objects
         .filter(objItem => arrTypes.includes(objItem.type) && (!strSchema || objItem.schema.toLowerCase() === strSchema))
@@ -230,7 +312,7 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
             ? quoteIdent(objItem.name, strDbKind)
             : qualifiedName(objItem.schema, objItem.name, strDbKind),
           range: objRange,
-          sortText: '25' + objItem.name,
+          sortText: '5' + objItem.name, // after tables ('2') and keywords ('3')
         }));
 
       const strTextBefore = objModel.getValueInRange({
@@ -255,7 +337,7 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
           const objTable = strStar === '' ? undefined : dicInner.get(unquote(strStar));
           return strStar === '' ? [...new Set(dicInner.values())] : objTable ? [objTable] : [];
         });
-        return [...derivedItems({ ref: objDerived.name, columns: objDerived.columns }), ...arrStarTables.flatMap(columnItems)];
+        return [...derivedItems({ ref: objDerived.name, columns: objDerived.columns }), ...arrStarTables.flatMap(objTable => columnItems(objTable))];
       };
 
       // `x.` -> columns of the alias / table / subquery, or the tables of schema x
@@ -264,7 +346,7 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
         const strQualifier = unquote(arrDot[1]);
         const objEntry = scopeEntry(arrScope, strQualifier);
         if (objEntry) {
-          const arrColumns = scopeColumns(objEntry);
+          const arrColumns = scopeColumns(objEntry, false);
           if (arrColumns.length > 0 || objEntry.columns) return { suggestions: arrColumns };
         }
         const objDerived = arrDerived.find(objItem => unquote(objItem.name) === strQualifier);
@@ -275,6 +357,8 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
         const objTable = tablesInQuery(objMeta, strSql).get(strQualifier) ?? findTable(objMeta, strQualifier);
         if (objTable) return { suggestions: columnItems(objTable) };
         const arrInSchema = objMeta.tables.filter(objItem => objItem.schema.toLowerCase() === strQualifier);
+        // FROM schema.| : only tables fit; procedures and packages would bury them.
+        if (/\b(?:from|join|update|into)\s+"?[\w$#]+"?\.$/i.test(strTextBefore)) return { suggestions: arrInSchema.map(objItem => tableItem(objItem, false)) };
         return {
           suggestions: [...arrInSchema.map(objItem => tableItem(objItem, false)), ...routineItems(['FUNCTION', 'PROCEDURE', 'PACKAGE'], strQualifier)],
         };
@@ -292,9 +376,9 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
       if (objAnalysis && (boolTables || boolColumns || boolRoutines || boolKeywordsOnly)) {
         const arrItems: Monaco.languages.CompletionItem[] = [];
         if (boolColumns) {
-          const arrColumns = arrScope.flatMap(scopeColumns);
+          const arrColumns = arrScope.flatMap(objEntry => scopeColumns(objEntry));
           // Broken SQL can hide the FROM clause from the parser: the regex still finds its tables.
-          arrItems.push(...(arrColumns.length > 0 ? arrColumns : [...new Set(tablesInQuery(objMeta, strSql).values())].flatMap(columnItems)));
+          arrItems.push(...(arrColumns.length > 0 ? arrColumns : columnsOfTables(objStatement?.sql ?? strSql)));
           arrItems.push(...arrDerived.flatMap(textDerivedItems));
           for (const objEntry of arrScope) {
             if (!objEntry.alias) continue;
@@ -320,7 +404,7 @@ export function registerSqlCompletion(objMonaco: typeof Monaco) {
         return { suggestions: objMeta.tables.map(objItem => tableItem(objItem)) };
       }
 
-      const arrColumns = [...new Set(tablesInQuery(objMeta, strSql).values())].flatMap(columnItems);
+      const arrColumns = columnsOfTables(objStatement?.sql ?? strSql);
       return {
         suggestions: [...snippetItems(), ...arrColumns, ...arrDerived.flatMap(textDerivedItems), ...objMeta.tables.map(objItem => tableItem(objItem)),
           ...keywordItems()],

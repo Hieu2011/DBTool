@@ -113,6 +113,9 @@ public sealed class RedisProvider : IDbProvider
             if (!objSink.Write(arrRow)) return;
     }
 
+    public Task<ResultOrigin> DescribeResultAsync(ConnectionProfile objProfile, string strSql, CancellationToken objCancelToken) =>
+        throw new NotSupportedException("Editing a result in the grid is only available for SQL databases.");
+
     public Task<RoutineInfo> LoadRoutineAsync(ConnectionProfile objProfile, DbObjectInfo objRoutine, CancellationToken objCancelToken) =>
         throw new NotSupportedException("Redis has no procedures or functions to execute.");
 

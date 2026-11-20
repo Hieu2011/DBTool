@@ -7,6 +7,7 @@ import type { Connection, DbObjectInfo, ObjectDetail, QueryResult, SchemaMetadat
 import { envVar } from '../envColor';
 import { IconClose } from './icons';
 import { ResultGrid } from './ResultGrid';
+import { EditableResult } from './EditableResult';
 import { TABLE_LIKE } from './ObjectTree';
 import { KeysEditor } from './KeysEditor';
 import { RoutineDiagram } from './RoutineDiagram';
@@ -35,7 +36,8 @@ interface Props {
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'done'; detail: ObjectDetail };
+  // partial: the quick grids are in; the slow ones (code using the table), the DDL and the comment are still loading.
+  | { status: 'done'; detail: ObjectDetail; partial?: boolean };
 
 type DataState =
   | { status: 'idle' }
@@ -173,9 +175,23 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   useEffect(() => {
     let boolStale = false;
     setObjState({ status: 'loading' });
-    api.objectDetail(objConnection.id, { schema: strSchema, name: strName, type: strType, signature: strSignature }).then(
+    const objTarget = { schema: strSchema, name: strName, type: strType, signature: strSignature };
+    // A table shows its columns as soon as the quick grids answer; the full answer (DDL, usages) replaces them when it comes.
+    if (TABLE_LIKE.has(strType)) {
+      api.objectDetail(objConnection.id, objTarget, false).then(
+        objQuick => { if (!boolStale) setObjState(objPrev => (objPrev.status === 'loading' ? { status: 'done', detail: objQuick, partial: true } : objPrev)); },
+        () => {}, // the full load reports the error
+      );
+    }
+    api.objectDetail(objConnection.id, objTarget).then(
       objDetail => { if (!boolStale) setObjState({ status: 'done', detail: objDetail }); },
-      objEx => { if (!boolStale) setObjState({ status: 'error', message: errorMessage(objEx) }); },
+      objEx => {
+        if (boolStale) return;
+        // Keep the grids already shown; the error takes the DDL's place.
+        setObjState(objPrev => (objPrev.status === 'done' && objPrev.partial
+          ? { status: 'done', detail: { ...objPrev.detail, ddlError: errorMessage(objEx) } }
+          : { status: 'error', message: errorMessage(objEx) }));
+      },
     );
     return () => { boolStale = true; };
   }, [objConnection.id, strSchema, strName, strType, strSignature, intReload]);
@@ -226,6 +242,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   };
 
   const objDetail = objState.status === 'done' ? objState.detail : undefined;
+  const boolPartial = objState.status === 'done' && !!objState.partial;
   const boolRoutine = ROUTINE_TYPES.includes(strType);
   const arrTabs = objDetail
     ? [
@@ -396,7 +413,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                   ? <DdlView strDdl={objDetail.ddl} strLanguage={editorLanguage(objConnection.kind)} />
                   : (
                     <p className="whitespace-pre-wrap p-4 text-muted" style={{ userSelect: 'text' }}>
-                      {objDetail.ddlError ?? 'No source is available for this object.'}
+                      {boolPartial ? 'Loading…' : objDetail.ddlError ?? 'No source is available for this object.'}
                     </p>
                   ))}
                 {strShown === DIAGRAM_TAB && boolRoutine && (
@@ -456,7 +473,11 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                     )}
                     {objData.status === 'done' && (
                       <div className="flex h-full flex-col">
-                        <div className="min-h-0 flex-1"><ResultGrid objResult={objData.result} strExportName={`${strSchema}.${strName}`} /></div>
+                        <div className="min-h-0 flex-1">
+                          {TABLE_LIKE.has(strType)
+                            ? <EditableResult objConnection={objConnection} strSql={strSelectAll} objResult={objData.result} intMaxRows={DATA_ROWS} strExportName={`${strSchema}.${strName}`} />
+                            : <ResultGrid objResult={objData.result} strExportName={`${strSchema}.${strName}`} />}
+                        </div>
                         <div className="shrink-0 border-t border-line bg-bg px-3 py-0.5 text-xs text-muted">
                           {objData.result.rows.length.toLocaleString()} rows
                           {objData.result.truncated && ` (first ${DATA_ROWS.toLocaleString()} only; use Open data for more)`}
@@ -493,7 +514,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                   ? <DdlView strDdl={objDetail.ddl} strLanguage={editorLanguage(objConnection.kind)} />
                   : (
                     <p className="whitespace-pre-wrap p-4 text-muted" style={{ userSelect: 'text' }}>
-                      {objDetail.ddlError ?? 'No DDL is available for this kind of object.'}
+                      {boolPartial ? 'Loading the DDL…' : objDetail.ddlError ?? 'No DDL is available for this kind of object.'}
                     </p>
                   )}
               </div>

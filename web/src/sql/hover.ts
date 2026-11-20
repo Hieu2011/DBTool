@@ -203,6 +203,40 @@ function callAt(strSql: string, intOffset: number) {
   return objTop?.name ? { name: objTop.name, argument: objTop.commas } : null;
 }
 
+/**
+ * The table / view / routine / sequence the cursor is on (an alias or alias.column leads to its table).
+ * loadSchema: the name is in a schema whose objects are not loaded yet (Oracle): load it and ask again.
+ */
+export function objectAt(objModel: Monaco.editor.ITextModel, objPosition: Monaco.Position): DbObjectInfo | { loadSchema: string } | null {
+  const objWord = objModel.getWordAtPosition(objPosition);
+  const objMeta = metadataOf(objModel);
+  if (!objWord || !objMeta) return null;
+  const strWord = objWord.word.toLowerCase();
+  const strLine = objModel.getLineContent(objPosition.lineNumber);
+  const strQualifier = /("[^"]+"|[\w$#]+)\s*\.\s*"?$/.exec(strLine.slice(0, objWord.startColumn - 1))?.[1];
+  const asInfo = (objTable: TableMeta): DbObjectInfo => ({ schema: objTable.schema, name: objTable.name, type: objTable.type });
+  const named = (strName: string, strSchema?: string) => (objMeta.objects ?? [])
+    .find(objItem => objItem.name.toLowerCase() === strName && (!strSchema || objItem.schema.toLowerCase() === strSchema));
+  const dicTables = tablesInQuery(objMeta, statementText(objModel, objModel.getOffsetAt(objPosition)).sql);
+
+  if (strQualifier) {
+    const strOwner = unquote(strQualifier);
+    const objTable = findTable(objMeta, `${strOwner}.${strWord}`);
+    if (objTable) return asInfo(objTable);
+    const objNamed = named(strWord, strOwner);
+    if (objNamed) return objNamed;
+    const strSchema = objMeta.schemas?.find(strItem => strItem.toLowerCase() === strOwner);
+    if (strSchema) return objMeta.loadedSchemas?.includes(strSchema) ? null : { loadSchema: strSchema };
+    // alias.column, table.column, package.member: the owner
+    const objOwner = dicTables.get(strOwner) ?? findTable(objMeta, strOwner);
+    if (objOwner) return asInfo(objOwner);
+    const objPlain = findTable(objMeta, strWord); // db.orders.find(...)
+    return objPlain ? asInfo(objPlain) : named(strOwner) ?? null;
+  }
+  const objTable = dicTables.get(strWord) ?? findTable(objMeta, strWord);
+  return objTable ? asInfo(objTable) : named(strWord) ?? null;
+}
+
 let boolRegistered = false;
 
 export function registerSqlHover(objMonaco: typeof Monaco) {

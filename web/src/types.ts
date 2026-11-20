@@ -50,6 +50,13 @@ export interface RedisKeyInfo { key: string; type: string }
 /** One SCAN page; cursor "0" means the scan is complete. */
 export interface RedisKeyPage { cursor: string; keys: RedisKeyInfo[] }
 
+/** Where a result column comes from; schema / table / column are null for an expression. */
+export interface ColumnOrigin { name: string; schema?: string | null; table?: string | null; column?: string | null }
+/** keyColumns: the table's primary key, empty when it has none. */
+export interface EditableTable { schema: string; name: string; keyColumns: string[] }
+/** columns: one entry per result column, in order. */
+export interface ResultOrigin { columns: ColumnOrigin[]; tables: EditableTable[] }
+
 export interface QueryError { message: string; position?: number | null; code?: string | null }
 
 export interface ColumnMeta { name: string; dataType: string }

@@ -5,6 +5,7 @@
  */
 import type * as Monaco from 'monaco-editor';
 import { metadataOf } from './completion';
+import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';
 import { getSnippets } from './snippets';
 import { splitStatements } from './statements';
 
@@ -100,8 +101,8 @@ export function registerMongoCompletion(objMonaco: typeof Monaco) {
         if (/\.\s*$/.test(strBefore)) return { suggestions: methodItems(COLLECTION_METHODS, 'collection') };
 
         // start of a statement
-        const arrSnippets = getSnippets().filter(objSnippet => objSnippet.prefix).map(objSnippet => ({
-          label: objSnippet.prefix, kind: objKind.Snippet, detail: objSnippet.name, documentation: objSnippet.body,
+        const arrSnippets = [...getSnippets().filter(objSnippet => objSnippet.prefix), ...builtinSnippets('mongo', getSnippets())].map(objSnippet => ({
+          label: snippetLabel(objSnippet), kind: objKind.Snippet, documentation: { value: '```js\n' + snippetCode(objSnippet.body) + '\n```' },
           insertText: objSnippet.body, insertTextRules: intSnippet, range: objRange, sortText: '2' + objSnippet.prefix,
         }));
         return {

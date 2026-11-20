@@ -1,6 +1,6 @@
 import type {
   Connection, ConnectionInput, DbObjectInfo, ExportResult, HistoryEntry, ObjectDetail, QueryError, QueryResult, RoutineArgument, RoutineInfo,
-  RedisDatabaseInfo, RedisKeyPage, RoutineResult, SchemaMetadata, Snippet,
+  RedisDatabaseInfo, RedisKeyPage, ResultOrigin, RoutineResult, SchemaMetadata, Snippet,
 } from './types';
 
 declare global {
@@ -163,6 +163,9 @@ export const api = {
       queryId: strQueryId, connectionId: strConnectionId, sql: strSql, maxRows: intMaxRows,
       sessionId: strSessionId, autoCommit: boolAutoCommit,
     }, onProgress),
+  /** Which table each column of a SELECT comes from (the statement is described, not run). */
+  describeResult: (strConnectionId: string, strSql: string) =>
+    request<ResultOrigin>('/query/describe', { method: 'POST', body: JSON.stringify({ connectionId: strConnectionId, sql: strSql }) }),
   cancel: (strQueryId: string) => request<void>(`/query/${strQueryId}/cancel`, { method: 'POST' }),
 
   /** UI settings kept by the app (sidebar width...): the browser's own storage is lost on every start. */

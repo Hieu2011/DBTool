@@ -184,6 +184,19 @@ export function sqlLiteral(strValue: string | null, strType: string, strKind: Db
   const strQuoted = `'${strValue.replace(/\u0000/g, '').replace(/'/g, "''")}'`;
   if (strKind !== 'Oracle') return strQuoted; // PostgreSQL casts the text to the column's type
 
+  // A plain literal passes through the database character set and can lose letters an N column would keep.
+  // eslint-disable-next-line no-control-regex
+  if (/^n(var)?char|^nclob/i.test(strType) && /[^\x00-\x7f]/.test(strValue)) {
+    const strEscaped = [...strValue.replace(/\u0000/g, '')].map(strChar => {
+      const intCode = strChar.charCodeAt(0);
+      if (strChar === "'") return "''";
+      if (strChar !== '\\' && intCode < 0x80) return strChar;
+      // UTF-16 units, so letters outside the BMP go as their surrogate pair.
+      return [...Array(strChar.length).keys()].map(intAt => `\\${strChar.charCodeAt(intAt).toString(16).toUpperCase().padStart(4, '0')}`).join('');
+    }).join('');
+    return `UNISTR('${strEscaped}')`;
+  }
+
   // Oracle would read a date through NLS_DATE_FORMAT: spell the format out instead.
   const arrDate = DATE_TEXT.exec(strValue);
   if (!arrDate || !/^(DATE|TIMESTAMP)/i.test(strType)) return strQuoted;

@@ -157,6 +157,7 @@ Mọi request `/api/*` phải có header `X-DbStudio-Token` (trừ chế độ `
 | GET | `/api/connections/{id}/metadata?refresh=true&schema=X` | Bảng/view/cột + object khác; cache tới khi refresh hoặc sửa connection. `schema`: load thêm schema đó (Oracle) |
 | GET | `/api/connections/{id}/object?schema=&name=&type=&signature=` | Chi tiết một object: các lưới (Columns, Indexes...) + DDL |
 | GET | `/api/connections/{id}/routine?schema=&name=&type=&signature=` | Tham số của procedure/function cho form Execute |
+| POST | `/api/query/describe` | Bảng / cột nguồn của từng cột kết quả + khoá chính, để sửa dữ liệu trên lưới (không chạy câu lệnh) |
 | POST | `/api/routine/execute` | `{ queryId, connectionId, routine, arguments, maxRows }` → cursor trả về (lưới) + giá trị OUT; dừng bằng `/api/query/{queryId}/cancel` |
 | POST | `/api/query` | `{ queryId, connectionId, sql, maxRows, sessionId?, autoCommit? }` → `QueryResult` |
 | POST | `/api/query/{queryId}/cancel` | Dừng query đang chạy |

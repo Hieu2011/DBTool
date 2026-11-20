@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
 import type { Connection, DbObjectInfo, QueryError, QueryResult, RoutineInfo, RoutineParameter, RoutineResult } from '../types';
 import { envVar } from '../envColor';
 import { ResultGrid } from './ResultGrid';
-import { IconCalendar, IconPlay, IconStop } from './icons';
+import { DatePickerButton, isDateType } from './DatePicker';
+import { IconPlay, IconStop } from './icons';
 
 interface Props {
   objConnection: Connection;
@@ -32,36 +33,6 @@ const toQueryError = (objEx: unknown): QueryError =>
   objEx instanceof ApiError ? objEx.detail : { message: (objEx as Error).message };
 
 const isInput = (objParameter: RoutineParameter) => objParameter.mode === 'IN' || objParameter.mode === 'INOUT';
-
-const isDateType = (strDataType: string) => /^(date|timestamp)/i.test(strDataType);
-
-/** Calendar button: the browser's own picker writes yyyy-MM-dd[ HH:mm:ss] into the text box. */
-function DatePickerButton({ strValue, boolDateOnly, onPick }: { strValue: string; boolDateOnly: boolean; onPick: (strValue: string) => void }) {
-  const refPicker = useRef<HTMLInputElement>(null);
-
-  // Start the picker at what is already typed, when it is a date.
-  const arrMatch = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?/.exec(strValue.trim());
-  const strPickerValue = !arrMatch ? '' : boolDateOnly ? arrMatch[1] : `${arrMatch[1]}T${arrMatch[2] ?? '00:00:00'}`;
-
-  const pick = (strPicked: string) => {
-    if (!strPicked) return;
-    if (boolDateOnly) return onPick(strPicked);
-    const [strDate, strTime = '00:00'] = strPicked.split('T');
-    onPick(`${strDate} ${strTime.length === 5 ? `${strTime}:00` : strTime.slice(0, 8)}`);
-  };
-
-  return (
-    <span className="relative shrink-0">
-      <button type="button" className="icon-btn" aria-label="Pick a date" title="Pick a date"
-        onClick={() => refPicker.current?.showPicker()}>
-        <IconCalendar intSize={15} />
-      </button>
-      <input ref={refPicker} type={boolDateOnly ? 'date' : 'datetime-local'} step={boolDateOnly ? undefined : 1} tabIndex={-1} aria-hidden="true"
-        className="pointer-events-none absolute bottom-0 left-0 h-0 w-0 opacity-0"
-        value={strPickerValue} onChange={objEvent => pick(objEvent.target.value)} />
-    </span>
-  );
-}
 
 /** Form to fill in a procedure's / function's parameters, run it, and see the cursors and OUT values it returns. */
 export function RoutineRunner({ objConnection, objRoutine, boolActive }: Props) {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
+import { joinLinks } from '../sql/routineJoins';
 import type { Connection, DbObjectInfo, QueryResult, SchemaMetadata } from '../types';
 import { BOX_W, DiagramCanvas, GAP_X, GAP_Y, PAD, nodeHeight, rowsFor, type DiagramEdge, type DiagramNode } from './DiagramCanvas';
 
@@ -13,12 +14,13 @@ interface Props {
 }
 
 interface UsedTable { key: string; schema: string; name: string; primary: string[] }
-interface Link { from: string; fromColumns: string[]; to: string; toColumns: string[]; constraint: string; inferred: boolean }
+/** joined: the routine's code compares the two columns (a.x = b.y). */
+interface Link { from: string; fromColumns: string[]; to: string; toColumns: string[]; constraint: string; inferred: boolean; joined?: boolean }
 
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'done'; tables: UsedTable[]; declared: Link[] };
+  | { status: 'done'; tables: UsedTable[]; declared: Link[]; source: string };
 
 const GENERIC_KEYS = new Set(['id', 'code', 'name']); // every table has one: not a relation
 const MAX_COLUMNS = 4;
@@ -45,11 +47,13 @@ export function RoutineDiagram({ objConnection, objObject, objMetadata, onOpenOb
     Promise.all([
       api.objectDetail(objConnection.id, objTarget, true, 'RoutineTables'),
       api.objectDetail(objConnection.id, objTarget, true, 'RoutineRelations'),
+      // The code itself, for the joins it writes. Without it the diagram still shows the declared relations.
+      api.objectDetail(objConnection.id, objTarget).then(objDetail => objDetail.ddl ?? '', () => ''),
     ]).then(
-      ([objTables, objRelations]) => {
+      ([objTables, objRelations, strSource]) => {
         if (boolStale) return;
         setObjState({
-          status: 'done',
+          status: 'done', source: strSource,
           tables: cells(objTables.sections[0]?.result, ['schema', 'table', 'primary_key']).map(([strTableSchema, strTable, strPrimary]) => ({
             key: `${strTableSchema}.${strTable}`, schema: strTableSchema, name: strTable, primary: splitNames(strPrimary),
           })),
@@ -69,13 +73,25 @@ export function RoutineDiagram({ objConnection, objObject, objMetadata, onOpenOb
 
   const objGraph = useMemo(() => {
     if (objState.status !== 'done') return null;
-    const { tables: arrTables, declared: arrDeclared } = objState;
+    const { tables: arrTables, declared: arrDeclared, source: strSource } = objState;
     const columnsOf = (objTable: UsedTable) =>
       objMetadata?.tables.find(objMeta => objMeta.schema === objTable.schema && objMeta.name === objTable.name)?.columns;
 
     // Guess: A points at B when A has every primary key column of B. One line per pair, declared keys win.
     const arrLinks = arrDeclared.filter(objLink => objLink.from !== objLink.to);
     const hsPairs = new Set(arrLinks.flatMap(objLink => [`${objLink.from}>${objLink.to}`, `${objLink.to}>${objLink.from}`]));
+    // Joins the code writes: one line per compared column pair, unless a declared key already links those columns.
+    const arrJoins = joinLinks(strSource, arrTables.map(objTable => ({
+      key: objTable.key, schema: objTable.schema, name: objTable.name, columns: columnsOf(objTable)?.map(objColumn => objColumn.name),
+    })));
+    for (const objJoin of arrJoins) {
+      const boolDeclared = arrDeclared.some(objLink =>
+        (objLink.from === objJoin.from && objLink.to === objJoin.to && objLink.fromColumns.includes(objJoin.fromColumn) && objLink.toColumns.includes(objJoin.toColumn))
+        || (objLink.from === objJoin.to && objLink.to === objJoin.from && objLink.fromColumns.includes(objJoin.toColumn) && objLink.toColumns.includes(objJoin.fromColumn)));
+      if (boolDeclared) continue;
+      hsPairs.add(`${objJoin.from}>${objJoin.to}`).add(`${objJoin.to}>${objJoin.from}`);
+      arrLinks.push({ from: objJoin.from, fromColumns: [objJoin.fromColumn], to: objJoin.to, toColumns: [objJoin.toColumn], constraint: 'joined in the code', inferred: false, joined: true });
+    }
     if (boolGuess) {
       for (const objParent of arrTables) {
         if (objParent.primary.length === 0 || objParent.primary.some(strColumn => GENERIC_KEYS.has(strColumn.toLowerCase()))) continue;
@@ -108,7 +124,9 @@ export function RoutineDiagram({ objConnection, objObject, objMetadata, onOpenOb
 
     const nameOf = (strKey: string) => arrTables.find(objTable => objTable.key === strKey)?.name ?? strKey;
     const arrEdges: DiagramEdge[] = arrLinks.map((objLink, intIndex) => {
-      const strLabel = `${objLink.constraint}: ${nameOf(objLink.from)} (${objLink.fromColumns.join(', ')}) → ${nameOf(objLink.to)} (${objLink.toColumns.join(', ')})`;
+      const strLabel = objLink.joined
+        ? `Joined in the code: ${nameOf(objLink.from)}.${objLink.fromColumns[0]} = ${nameOf(objLink.to)}.${objLink.toColumns[0]}`
+        : `${objLink.constraint}: ${nameOf(objLink.from)} (${objLink.fromColumns.join(', ')}) → ${nameOf(objLink.to)} (${objLink.toColumns.join(', ')})`;
       return {
         key: `${intIndex}-${objLink.from}-${objLink.to}`, from: objLink.from, fromColumn: objLink.fromColumns[0],
         to: objLink.to, toColumn: objLink.toColumns[0],
@@ -116,7 +134,10 @@ export function RoutineDiagram({ objConnection, objObject, objMetadata, onOpenOb
       };
     });
 
-    return { nodes: arrNodes, edges: arrEdges, guessed: arrLinks.filter(objLink => objLink.inferred).length };
+    return {
+      nodes: arrNodes, edges: arrEdges, guessed: arrLinks.filter(objLink => objLink.inferred).length,
+      joined: arrLinks.filter(objLink => objLink.joined).length,
+    };
   }, [objState, objMetadata, boolGuess]);
 
   if (objState.status === 'loading') return <p className="p-4 text-muted">Finding the tables this {strType.toLowerCase()} uses…</p>;
@@ -131,7 +152,8 @@ export function RoutineDiagram({ objConnection, objObject, objMetadata, onOpenOb
       arrNodes={objGraph.nodes} arrEdges={objGraph.edges} onReload={() => setIntReload(intPrev => intPrev + 1)} onOpenObject={onOpenObject}
       objStatus={intTables === 0
         ? `No table was found in this ${strType.toLowerCase()}.`
-        : `${intTables} ${intTables === 1 ? 'table' : 'tables'} used · ${objGraph.edges.length - objGraph.guessed} declared relations, ${objGraph.guessed} guessed (dashed)`}
+        : `${intTables} ${intTables === 1 ? 'table' : 'tables'} used · ${objGraph.edges.length - objGraph.guessed - objGraph.joined} declared relations, `
+          + `${objGraph.joined} joins in the code, ${objGraph.guessed} guessed (dashed)`}
       objToolbar={(
         <button className={`btn h-6 px-2 ${boolGuess ? 'text-accent' : ''}`} aria-pressed={boolGuess} onClick={() => setBoolGuess(boolPrev => !boolPrev)}
           title="Links a table to another when it has all of that table's primary key columns (same names)">

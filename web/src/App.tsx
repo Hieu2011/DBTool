@@ -417,6 +417,7 @@ export default function App() {
             onOpenObject={objObject => openObject(objActiveConnection.id, objObject)}
             onOpenSql={(strSql, boolAutoRun) => newQueryTab(objActiveConnection.id, strSql, boolAutoRun)}
             onExecuteRoutine={objRoutine => openObject(objActiveConnection.id, objRoutine, 'routine')}
+            objReveal={objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null}
             onOpenData={objObject => newQueryTab(
               objActiveConnection.id,
               selectAllQuery(objActiveConnection.kind, objObject.schema, objObject.name),
@@ -438,7 +439,9 @@ export default function App() {
       )}
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-9 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-1.5" role="tablist">
+        {/* No scrollbar (it would cover the tabs): the wheel scrolls the strip, and the active tab scrolls itself into view. */}
+        <div className="flex h-9 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-1.5 [scrollbar-width:none]" role="tablist"
+          onWheel={objEvent => { objEvent.currentTarget.scrollLeft += objEvent.deltaX || objEvent.deltaY; }}>
             <button
               className={`icon-btn icon-btn-sm mb-1 mr-1 ${boolSidebarOpen ? '' : 'text-accent'}`}
               aria-label={boolSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
@@ -453,6 +456,7 @@ export default function App() {
                 key={objTab.id}
                 role="tab"
                 aria-selected={objTab.id === strActiveTabId}
+                ref={objTab.id === strActiveTabId ? objElement => objElement?.scrollIntoView({ block: 'nearest', inline: 'nearest' }) : undefined}
                 title={tabTitle(objTab, objConnection)}
                 onClick={() => setStrActiveTabId(objTab.id)}
                 className={`group flex h-8 max-w-56 shrink-0 items-center gap-2 rounded-t border border-b-0 px-3 ${
@@ -523,6 +527,7 @@ export default function App() {
                 onTransactionChange={trackTransaction}
                 onHandle={registerEditor}
                 onContentChange={markDirty}
+                onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 strInitialSql={objTab.initialSql}
                 boolAutoRun={objTab.autoRun}
               />

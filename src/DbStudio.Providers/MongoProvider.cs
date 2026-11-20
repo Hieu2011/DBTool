@@ -74,6 +74,9 @@ public sealed partial class MongoProvider : IDbProvider
         return objResult;
     }
 
+    public Task<ResultOrigin> DescribeResultAsync(ConnectionProfile objProfile, string strSql, CancellationToken objCancelToken) =>
+        throw new NotSupportedException("Editing a result in the grid is only available for SQL databases.");
+
     public Task<RoutineInfo> LoadRoutineAsync(ConnectionProfile objProfile, DbObjectInfo objRoutine, CancellationToken objCancelToken) =>
         throw new NotSupportedException("MongoDB has no procedures or functions to execute.");
 

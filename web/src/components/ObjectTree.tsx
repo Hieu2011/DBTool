@@ -23,6 +23,8 @@ interface Props {
   onOpenSql: (strSql: string, boolAutoRun?: boolean) => void;
   /** Opens the form that runs a procedure or function with parameters. */
   onExecuteRoutine: (objRoutine: DbObjectInfo) => void;
+  /** The object of the active tab: the tree opens down to it, shows it and marks it. */
+  objReveal?: DbObjectInfo | null;
 }
 
 interface TreeItem { object: DbObjectInfo; columns?: ColumnMeta[] }
@@ -34,7 +36,8 @@ type DetailState =
   | { status: 'done'; detail: ObjectDetail };
 
 type TreeRow =
-  | { kind: 'schema' | 'group' | 'folder'; key: string; depth: number; label: string; count: number | null; expanded: boolean }
+  // filtered: opened by the filter, not by the user (collapsing it is remembered apart).
+  | { kind: 'schema' | 'group' | 'folder'; key: string; depth: number; label: string; count: number | null; expanded: boolean; filtered?: boolean }
   | { kind: 'object'; key: string; depth: number; item: TreeItem; expandable: boolean; expanded: boolean }
   | { kind: 'leaf'; key: string; depth: number; folder: string; label: string; detail: string; open?: DbObjectInfo }
   | { kind: 'message'; key: string; depth: number; text: string; danger: boolean };
@@ -179,14 +182,21 @@ function groupObjects(objMetadata: SchemaMetadata, arrFixedGroups: [string, stri
 }
 
 export function ObjectTree({
-  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine,
+  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine, objReveal,
 }: Props) {
+  // Row of the active tab's object; strScrollTo: still to be scrolled into view (its rows may not exist yet).
+  const [strCurrentKey, setStrCurrentKey] = useState<string | null>(null);
+  const [strScrollTo, setStrScrollTo] = useState<string | null>(null);
+  const refRevealed = useRef<string | null>(null);
   const refScroller = useRef<HTMLDivElement>(null);
   const [objMenu, setObjMenu] = useState<{ x: number; y: number; row: TreeRow } | null>(null);
   const [boolScripting, setBoolScripting] = useState(false);
   const refAutoExpanded = useRef(false);
   const [hsExpanded, setHsExpanded] = useState<Set<string>>(new Set());
   const [strFilter, setStrFilter] = useState('');
+  // The filter opens every schema / group that holds a match; these are the ones the user closed again.
+  const [hsFilterClosed, setHsFilterClosed] = useState<Set<string>>(new Set());
+  useEffect(() => { setHsFilterClosed(new Set()); }, [strFilter]);
   const [strState, setStrState] = useState<'idle' | 'loading' | string>('idle');
   // Schemas being loaded ('loading') or that failed to load (the error text).
   const [dicSchemaState, setDicSchemaState] = useState<Record<string, string>>({});
@@ -247,6 +257,26 @@ export function ObjectTree({
       if (!objSchema.loaded && hsExpanded.has(schemaKey(objSchema.schema)) && !(objSchema.schema in dicSchemaState))
         loadSchema(objSchema.schema);
   }, [arrSchemas, hsExpanded, dicSchemaState]);
+
+  // Follows the active tab: opens the schema (loading it when needed), its folder and the object itself.
+  const strRevealId = objReveal ? `${objReveal.schema}:${objReveal.type}:${objReveal.name}:${objReveal.signature ?? ''}` : null;
+  useEffect(() => {
+    if (!objReveal || !strRevealId) { refRevealed.current = null; return setStrCurrentKey(null); }
+    if (refRevealed.current === strRevealId) return;
+    const objSchema = arrSchemas.find(objItem => objItem.schema === objReveal.schema);
+    if (!objSchema) return;
+    if (!objSchema.loaded) return setHsExpanded(hsPrev => (hsPrev.has(schemaKey(objReveal.schema)) ? hsPrev : new Set(hsPrev).add(schemaKey(objReveal.schema))));
+    const objItem = objSchema.groups.find(([strType]) => strType === objReveal.type)?.[1].find(objCandidate =>
+      objCandidate.object.name === objReveal.name && (objReveal.signature == null || objCandidate.object.signature == null || objCandidate.object.signature === objReveal.signature));
+    refRevealed.current = strRevealId; // found or not: one try per tab switch
+    if (!objItem) return setStrCurrentKey(null);
+    const strKey = objectKey(objItem.object);
+    setHsExpanded(hsPrev => new Set(hsPrev).add(schemaKey(objReveal.schema)).add(`g:${objReveal.schema}:${objReveal.type}`).add(strKey));
+    // A filter that hides it would hide the answer.
+    setStrFilter(strPrev => (strPrev.trim() && !objReveal.name.toLowerCase().includes(strPrev.trim().toLowerCase()) ? '' : strPrev));
+    setStrCurrentKey(strKey);
+    setStrScrollTo(strKey);
+  }, [strRevealId, arrSchemas]);
 
   const { arrRows, arrNeedDetail } = useMemo(() => {
     const strNeedle = strFilter.trim().toLowerCase();
@@ -339,10 +369,10 @@ export function ObjectTree({
       const boolByObjects = !!strNeedle && arrMatching.length > 0;
       if (strNeedle && !boolByObjects && !strSchema.toLowerCase().includes(strNeedle)) continue;
       const arrVisible = boolByObjects ? arrMatching : arrGroups;
-      const boolSchemaOpen = boolByObjects || hsExpanded.has(strSchemaKey);
+      const boolSchemaOpen = boolByObjects ? !hsFilterClosed.has(strSchemaKey) : hsExpanded.has(strSchemaKey);
 
       arrResult.push({
-        kind: 'schema', key: strSchemaKey, depth: 0, label: strSchema, expanded: boolSchemaOpen,
+        kind: 'schema', key: strSchemaKey, depth: 0, label: strSchema, expanded: boolSchemaOpen, filtered: boolByObjects,
         count: boolLoaded ? arrVisible.reduce((intSum, [, arrItems]) => intSum + arrItems.length, 0) : null,
       });
       if (!boolSchemaOpen) continue;
@@ -359,16 +389,16 @@ export function ObjectTree({
 
       for (const [strType, arrItems] of arrVisible) {
         const strGroupKey = `g:${strSchema}:${strType}`;
-        const boolGroupOpen = arrItems.length > 0 && (boolByObjects || hsExpanded.has(strGroupKey));
+        const boolGroupOpen = arrItems.length > 0 && (boolByObjects ? !hsFilterClosed.has(strGroupKey) : hsExpanded.has(strGroupKey));
         arrResult.push({
           kind: 'group', key: strGroupKey, depth: 1, label: dicGroupLabel.get(strType) ?? strType,
-          count: arrItems.length, expanded: boolGroupOpen,
+          count: arrItems.length, expanded: boolGroupOpen, filtered: boolByObjects,
         });
         if (boolGroupOpen) arrItems.forEach(pushObject);
       }
     }
     return { arrRows: arrResult, arrNeedDetail: arrNeeded };
-  }, [arrSchemas, hsExpanded, strFilter, dicSchemaState, dicDetails, dicGroupLabel, dicObjectFolders, objConnection.kind]);
+  }, [arrSchemas, hsExpanded, hsFilterClosed, strFilter, dicSchemaState, dicDetails, dicGroupLabel, dicObjectFolders, objConnection.kind]);
 
   // A folder was opened whose content isn't here yet.
   useEffect(() => {
@@ -384,16 +414,26 @@ export function ObjectTree({
     overscan: 15,
   });
 
+  useEffect(() => {
+    if (!strScrollTo) return;
+    const intIndex = arrRows.findIndex(objRow => objRow.key === strScrollTo);
+    if (intIndex < 0) return;
+    objVirtual.scrollToIndex(intIndex, { align: 'center' });
+    setStrScrollTo(null);
+  }, [strScrollTo, arrRows]);
+
   const toggle = (objRow: TreeRow) => {
     // Collapsing a schema that failed to load clears the error, so opening it again retries.
     if (objRow.kind === 'schema' && objRow.expanded)
       setDicSchemaState(({ [objRow.label]: strDropped, ...dicRest }) =>
         (strDropped === 'loading' ? { ...dicRest, [objRow.label]: strDropped } : dicRest));
-    setHsExpanded(hsPrev => {
+    const flip = (hsPrev: Set<string>) => {
       const hsNext = new Set(hsPrev);
       if (!hsNext.delete(objRow.key)) hsNext.add(objRow.key);
       return hsNext;
-    });
+    };
+    if ((objRow.kind === 'schema' || objRow.kind === 'group') && objRow.filtered) setHsFilterClosed(flip);
+    else setHsExpanded(flip);
   };
 
   const chevron = (boolExpanded: boolean) => (
@@ -638,7 +678,8 @@ export function ObjectTree({
             return (
               <div
                 key={objRow.key}
-                className="group absolute left-0 flex w-full items-center gap-1.5 pr-1.5 hover:bg-hover"
+                className={`group absolute left-0 flex w-full items-center gap-1.5 pr-1.5 hover:bg-hover ${
+                  objRow.key === strCurrentKey ? 'bg-accent/15 shadow-[inset_2px_0_0_var(--accent)]' : ''}`}
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)`, paddingLeft: 8 + objRow.depth * 12 }}
                 onClick={canToggle(objRow) ? () => toggle(objRow) : undefined}
                 onDoubleClick={objTarget ? () => onOpenObject(objTarget) : undefined}

@@ -8,6 +8,17 @@ namespace DbStudio.Providers;
 public sealed partial class PostgresProvider
 {
     // proargtypes only lists input arguments; proallargtypes (when set) lists them all. 't' = RETURNS TABLE column.
+    protected override string PrimaryKeySql => """
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON true
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+        WHERE i.indisprimary AND n.nspname = @schema AND c.relname = @name AND c.relkind IN ('r', 'p')
+        ORDER BY k.ord
+        """;
+
     protected override string RoutineParametersSql => """
         SELECT a.ord,
                coalesce(nullif(p.proargnames[a.ord::int], ''), '$' || a.ord),

@@ -1,9 +1,10 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { QueryResult } from '../types';
 import { downloadBlob } from '../diagramExport';
 import { exportFileName, toCsv, toXlsx } from '../exportData';
-import { IconDownload, IconFilter } from './icons';
+import { DatePickerButton, isDateType } from './DatePicker';
+import { IconDownload, IconFilter, IconPencil } from './icons';
 
 const ROW_H = 24;
 const INDEX_W = 56;
@@ -13,13 +14,32 @@ const NUMERIC = /^(int|integer|bigint|smallint|numeric|decimal|number|float|doub
 
 const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
-const display = (objValue: unknown): string => {
+export const display = (objValue: unknown): string => {
   if (objValue === null || objValue === undefined) return '';
   if (typeof objValue === 'object') return JSON.stringify(objValue);
   return String(objValue);
 };
 
 interface SortState { col: number; desc: boolean }
+
+/** Asked from a toolbar outside the grid; it works on the rows as shown (filter, sort). */
+export type GridCommand = 'first' | 'prev' | 'next' | 'last' | 'edit' | 'xlsx' | 'csv';
+
+/** Cell editing, driven by the owner of the result (EditableResult). Changes are keyed `row:col`. */
+export interface GridEdit {
+  /** Per column: can its cells be edited. */
+  arrEditable: boolean[];
+  dicChanges: Map<string, string | null>;
+  canEdit: (intRow: number) => boolean;
+  /** strValue undefined: the cell is back to what was loaded. */
+  onEdit: (intRow: number, intCol: number, strValue: string | null | undefined) => void;
+  /** Rows from this index on are new (not in the database yet): kept last, never filtered or sorted. */
+  intBase: number;
+  /** Rows marked for deletion. */
+  hsDeleted: Set<number>;
+  /** Asked before a cell opens; false keeps it closed. */
+  start?: (intRow: number) => Promise<boolean>;
+}
 
 /** Sort and filter work on the rows already loaded, not on the database. */
 interface Props {
@@ -28,9 +48,28 @@ interface Props {
   onSelectRow?: (intRow: number) => void;
   /** Start of the exported file's name; "result" when not given. */
   strExportName?: string;
+  /** Set while the result is being edited. */
+  objEdit?: GridEdit;
+  /** Selected rows (indexes in objResult.rows), when the owner keeps them. */
+  hsRows?: Set<number>;
+  onRows?: (hsRows: Set<number>) => void;
+  /** A new object each time: scrolls that row into view. */
+  objReveal?: { row: number } | null;
+  /** A new object each time it is asked. */
+  objCommand?: { name: GridCommand } | null;
+  /** The owner has its own export button. */
+  boolNoExport?: boolean;
 }
 
-export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
+export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsRows, onRows, objReveal, objCommand, boolNoExport }: Props) {
+  const refEditBox = useRef<HTMLInputElement>(null);
+  const refPickerOpen = useRef(false);
+  const [hsInner, setHsInner] = useState<Set<number>>(new Set());
+  const hsPicked = hsRows ?? hsInner;
+  const refAnchor = useRef<number | null>(null); // where a Shift+click range starts
+  // The cell being typed in.
+  const [objEditing, setObjEditing] = useState<{ r: number; c: number; text: string } | null>(null);
+  const refEditClosed = useRef(false); // Enter / Escape already ended the edit: the blur that follows must not commit again
   const refScroller = useRef<HTMLDivElement>(null);
   // r is the row's index in objResult.rows, so the selection survives sorting.
   const [objSelected, setObjSelected] = useState<{ r: number; c: number } | null>(null);
@@ -49,6 +88,8 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
 
   const arrNumeric = useMemo(() => objResult.columns.map(objColumn => NUMERIC.test(objColumn.dataType)), [objResult]);
 
+  const intBase = Math.min(objEdit?.intBase ?? objResult.rows.length, objResult.rows.length);
+
   // Indexes into objResult.rows after filtering and sorting.
   const arrView = useMemo(() => {
     const arrActive = boolFilters
@@ -57,7 +98,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
         .filter(([intCol, strText]) => strText !== '' && intCol < objResult.columns.length)
       : [];
 
-    let arrIndexes = objResult.rows.map((_, intRow) => intRow);
+    let arrIndexes = objResult.rows.slice(0, intBase).map((_, intRow) => intRow);
     if (arrActive.length > 0) {
       arrIndexes = arrIndexes.filter(intRow => arrActive.every(([intCol, strText]) => {
         const objValue = objResult.rows[intRow][intCol];
@@ -76,8 +117,9 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
         return (boolDesc ? -intOrder : intOrder) || intA - intB;
       });
     }
+    for (let intRow = intBase; intRow < objResult.rows.length; intRow++) arrIndexes.push(intRow);
     return arrIndexes;
-  }, [objResult, arrNumeric, objSort, boolFilters, dicFilters]);
+  }, [objResult, arrNumeric, objSort, boolFilters, dicFilters, intBase]);
 
   const intTotalWidth = INDEX_W + arrWidths.reduce((intSum, intWidth) => intSum + intWidth, 0);
   const boolFiltered = arrView.length !== objResult.rows.length;
@@ -89,11 +131,118 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
     overscan: 20,
   });
 
-  const copy = (objEvent: React.KeyboardEvent) => {
-    if (objEvent.target instanceof HTMLInputElement) return; // filter box copies its own text
-    if (!objSelected || !(objEvent.ctrlKey && objEvent.key === 'c')) return;
-    navigator.clipboard.writeText(display(objResult.rows[objSelected.r]?.[objSelected.c]));
+  useEffect(() => {
+    const intAt = objReveal ? arrView.indexOf(objReveal.row) : -1;
+    if (intAt >= 0) objVirtual.scrollToIndex(intAt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objReveal]);
+
+  useEffect(() => {
+    if (!objCommand) return;
+    const strName = objCommand.name;
+    if (strName === 'xlsx' || strName === 'csv') return exportRows(strName);
+    if (strName === 'edit') { if (objSelected) beginEdit(objSelected.r, objSelected.c); return; }
+    if (arrView.length === 0) return;
+    const intAt = objSelected ? arrView.indexOf(objSelected.r) : -1;
+    const intView = strName === 'first' ? 0 : strName === 'last' ? arrView.length - 1
+      : Math.min(Math.max(intAt + (strName === 'next' ? 1 : -1), 0), arrView.length - 1);
+    const intRow = arrView[intView];
+    setObjSelected({ r: intRow, c: objSelected?.c ?? 0 });
+    pickCell(intRow, { ctrlKey: false, shiftKey: false });
+    onSelectRow?.(intRow);
+    objVirtual.scrollToIndex(intView);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objCommand]);
+
+  /** Empty text is NULL. Typing the loaded value back removes the change. */
+  const commitEdit = () => {
+    if (!objEditing || !objEdit || refEditClosed.current) return;
+    refEditClosed.current = true;
+    const objOriginal = objResult.rows[objEditing.r]?.[objEditing.c];
+    const strValue = objEditing.text === '' ? null : objEditing.text;
+    const boolSame = strValue === null ? objOriginal === null || objOriginal === undefined : objOriginal !== null && display(objOriginal) === strValue;
+    objEdit.onEdit(objEditing.r, objEditing.c, boolSame ? undefined : strValue);
+    closeEdit();
+  };
+  const closeEdit = () => {
+    refEditClosed.current = true;
+    setObjEditing(null);
+    refScroller.current?.focus({ preventScroll: true }); // keys keep working
+  };
+
+  /** The value on screen: the pending edit when there is one. */
+  const valueAt = (intRow: number, intCol: number) => {
+    const strCell = `${intRow}:${intCol}`;
+    return objEdit?.dicChanges.has(strCell) ? objEdit.dicChanges.get(strCell) ?? null : objResult.rows[intRow]?.[intCol];
+  };
+
+  const beginEdit = async (intRow: number, intCol: number) => {
+    if (!objEdit || !objEdit.arrEditable[intCol] || !objEdit.canEdit(intRow)) return;
+    const objValue = valueAt(intRow, intCol);
+    if (objEdit.start && !(await objEdit.start(intRow))) return;
+    refEditClosed.current = false;
+    setObjEditing({ r: intRow, c: intCol, text: objValue === null || objValue === undefined ? '' : display(objValue) });
+  };
+
+  const selectRows = (hsNext: Set<number>) => { setHsInner(hsNext); onRows?.(hsNext); };
+
+  /** Click: that row. Ctrl: add / remove it. Shift: the range from the last plain click, in the order shown. */
+  const pickRow = (intRow: number, objKeys: { ctrlKey: boolean; shiftKey: boolean }) => {
+    if (objKeys.shiftKey && refAnchor.current !== null) {
+      const intFrom = arrView.indexOf(refAnchor.current);
+      const intTo = arrView.indexOf(intRow);
+      if (intFrom >= 0 && intTo >= 0) return selectRows(new Set(arrView.slice(Math.min(intFrom, intTo), Math.max(intFrom, intTo) + 1)));
+    }
+    refAnchor.current = intRow;
+    if (!objKeys.ctrlKey) return selectRows(new Set([intRow]));
+    const hsNext = new Set(hsPicked);
+    if (!hsNext.delete(intRow)) hsNext.add(intRow);
+    selectRows(hsNext);
+  };
+
+  /** A cell became the current one: that is not a row selection, unless Ctrl / Shift is held. */
+  const pickCell = (intRow: number, objKeys: { ctrlKey: boolean; shiftKey: boolean }) => {
+    if (objKeys.ctrlKey || objKeys.shiftKey) return pickRow(intRow, objKeys);
+    refAnchor.current = intRow;
+    if (hsPicked.size > 0) selectRows(new Set());
+  };
+
+  const onKey = (objEvent: React.KeyboardEvent) => {
+    if (objEvent.target instanceof HTMLInputElement) return; // filter and cell boxes handle their own keys
+    if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'a') {
+      selectRows(new Set(arrView));
+      return objEvent.preventDefault();
+    }
+    if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'c') {
+      // Several rows: tab-separated lines. Else the cell.
+      const strText = hsPicked.size > 1
+        ? arrView.filter(intRow => hsPicked.has(intRow)).map(intRow => objResult.columns.map((_, intCol) => display(valueAt(intRow, intCol))).join('\t')).join('\n')
+        : objSelected ? display(valueAt(objSelected.r, objSelected.c)) : null;
+      if (strText === null) return;
+      navigator.clipboard.writeText(strText);
+      return objEvent.preventDefault();
+    }
+    if (!objSelected || objEvent.ctrlKey || objEvent.altKey) return;
+    if (objEvent.key === 'Enter' || objEvent.key === 'F2') {
+      beginEdit(objSelected.r, objSelected.c);
+      return objEvent.preventDefault();
+    }
+    const intAt = arrView.indexOf(objSelected.r);
+    if (intAt < 0) return;
+    const arrStep = ({ ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] } as Record<string, number[]>)[objEvent.key];
+    if (!arrStep) return;
     objEvent.preventDefault();
+    const intView = Math.min(Math.max(intAt + arrStep[0], 0), arrView.length - 1);
+    const intCol = Math.min(Math.max(objSelected.c + arrStep[1], 0), objResult.columns.length - 1);
+    const intRow = arrView[intView];
+    setObjSelected({ r: intRow, c: intCol });
+    onSelectRow?.(intRow);
+    if (arrStep[0] !== 0) {
+      pickCell(intRow, { ctrlKey: false, shiftKey: objEvent.shiftKey });
+      objVirtual.scrollToIndex(intView);
+    } else {
+      requestAnimationFrame(() => refScroller.current?.querySelector(`[data-cell="${intRow}:${intCol}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+    }
   };
 
   // Exports what the grid shows: the loaded rows, after the filter, in the sorted order.
@@ -109,7 +258,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
     setObjSort(objPrev => (objPrev?.col !== intCol ? { col: intCol, desc: false } : objPrev.desc ? null : { col: intCol, desc: true }));
 
   return (
-    <div ref={refScroller} tabIndex={0} onKeyDown={copy}
+    <div ref={refScroller} tabIndex={0} onKeyDown={onKey}
       className="h-full overflow-auto font-mono text-xs outline-none">
       <div style={{ width: intTotalWidth, minWidth: '100%' }}>
         {/* header */}
@@ -121,11 +270,13 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
                 aria-label="Filter rows" title="Filter the loaded rows" onClick={() => setBoolFilters(boolPrev => !boolPrev)}>
                 <IconFilter intSize={14} />
               </button>
-              <button type="button" className="icon-btn icon-btn-sm" aria-haspopup="menu" aria-expanded={boolExportMenu}
-                aria-label="Export rows" title="Export the rows shown here to Excel or CSV" disabled={objResult.columns.length === 0}
-                onClick={() => setBoolExportMenu(boolPrev => !boolPrev)}>
-                <IconDownload intSize={14} />
-              </button>
+              {!boolNoExport && (
+                <button type="button" className="icon-btn icon-btn-sm" aria-haspopup="menu" aria-expanded={boolExportMenu}
+                  aria-label="Export rows" title="Export the rows shown here to Excel or CSV" disabled={objResult.columns.length === 0}
+                  onClick={() => setBoolExportMenu(boolPrev => !boolPrev)}>
+                  <IconDownload intSize={14} />
+                </button>
+              )}
               {boolExportMenu && (
                 <div role="menu" className="absolute left-1 top-full z-20 min-w-44 rounded border border-line bg-panel py-1 text-xs shadow-lg">
                   <div className="px-3 pb-1 text-[11px] text-muted">{arrView.length.toLocaleString()} rows shown</div>
@@ -138,30 +289,36 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
             </div>
             {objResult.columns.map((objColumn, intCol) => (
               <div key={intCol} style={{ width: arrWidths[intCol] }} role="button" onClick={() => toggleSort(intCol)}
-                title={`${objColumn.name} (${objColumn.dataType}) · click to sort`}
-                className={`shrink-0 cursor-pointer truncate border-r border-line px-2 py-1 hover:bg-hover ${arrNumeric[intCol] ? 'text-right' : ''}`}>
-                <div className="truncate text-[12px] font-semibold">
+                className={`shrink-0 cursor-pointer truncate border-r border-line px-2 py-1 hover:bg-hover ${arrNumeric[intCol] ? 'text-right' : ''} ${
+                  objEdit?.arrEditable[intCol] ? 'bg-accent/10 shadow-[inset_0_-2px_0_var(--accent)]' : ''}`}>
+                <div className={`truncate text-[12px] font-semibold ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-45' : ''}`}>
+                  {objEdit?.arrEditable[intCol] && <span className="mr-1 inline-block align-[-1px] text-accent"><IconPencil intSize={11} /></span>}
                   {objColumn.name}
                   {objSort?.col === intCol && <span className="ml-1 text-accent">{objSort.desc ? '▼' : '▲'}</span>}
                 </div>
-                <div className="truncate text-[11px] text-muted">{objColumn.dataType}</div>
+                <div className={`truncate text-[11px] text-muted ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-45' : ''}`}>{objColumn.dataType}</div>
               </div>
             ))}
           </div>
 
           {boolFilters && (
-            <div className="flex border-t border-line">
-              <div style={{ width: INDEX_W }} title={`${arrView.length.toLocaleString()} of ${objResult.rows.length.toLocaleString()} loaded rows`}
-                className={`shrink-0 truncate border-r border-line px-1 text-right text-[11px] leading-6 ${boolFiltered ? 'text-accent' : 'text-muted'}`}>
-                {arrView.length.toLocaleString()}
+            <div className="flex border-t border-line border-b-2 border-b-accent/50 bg-accent/10">
+              <div style={{ width: INDEX_W }} title={`Filter: ${arrView.length.toLocaleString()} of ${objResult.rows.length.toLocaleString()} loaded rows shown`}
+                className={`flex shrink-0 items-center justify-end gap-1 border-r border-line px-1 text-[11px] ${boolFiltered ? 'font-semibold text-accent' : 'text-muted'}`}>
+                <IconFilter intSize={11} />
+                <span className="truncate">{arrView.length.toLocaleString()}</span>
               </div>
-              {objResult.columns.map((objColumn, intCol) => (
-                <div key={intCol} style={{ width: arrWidths[intCol] }} className="shrink-0 border-r border-line">
-                  <input value={dicFilters[intCol] ?? ''} placeholder="contains…" aria-label={`Filter ${objColumn.name}`}
-                    onChange={objEvent => setDicFilters(dicPrev => ({ ...dicPrev, [intCol]: objEvent.target.value }))}
-                    className="h-6 w-full bg-transparent px-2 font-mono text-xs outline-none placeholder:text-muted/60 focus:bg-panel" />
-                </div>
-              ))}
+              {objResult.columns.map((objColumn, intCol) => {
+                const boolSet = (dicFilters[intCol] ?? '').trim() !== '';
+                return (
+                  <div key={intCol} style={{ width: arrWidths[intCol] }} className="shrink-0 border-r border-line p-0.5">
+                    <input value={dicFilters[intCol] ?? ''} placeholder="filter…" aria-label={`Filter ${objColumn.name}`}
+                      onChange={objEvent => setDicFilters(dicPrev => ({ ...dicPrev, [intCol]: objEvent.target.value }))}
+                      className={`h-6 w-full rounded-sm border bg-panel px-1.5 font-mono text-xs outline-none placeholder:italic placeholder:text-muted/60 focus:border-accent ${
+                        boolSet ? 'border-accent' : 'border-line'}`} />
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -171,22 +328,60 @@ export function ResultGrid({ objResult, onSelectRow, strExportName }: Props) {
           {objVirtual.getVirtualItems().map(objItem => {
             const intRow = arrView[objItem.index];
             const arrRow = objResult.rows[intRow];
+            const boolNew = intRow >= intBase;
+            const boolDeleted = !!objEdit?.hsDeleted.has(intRow);
+            const boolPicked = hsPicked.has(intRow);
             return (
-              <div key={objItem.key} className="absolute left-0 flex w-full border-b border-line/60 hover:bg-hover/60"
+              <div key={objItem.key}
+                className={`absolute left-0 flex w-full border-b border-line/60 ${
+                  boolDeleted ? 'bg-danger/15 line-through' : boolNew ? 'bg-success/15' : boolPicked ? 'bg-accent/25 shadow-[inset_0_1px_0_var(--accent),inset_0_-1px_0_var(--accent)]' : 'hover:bg-hover/60'}`}
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)` }}>
-                <div style={{ width: INDEX_W }}
-                  className="shrink-0 border-r border-line px-2 text-right leading-6 text-muted">
-                  {objItem.index + 1}
+                <div style={{ width: INDEX_W }} onClick={objEvent => { setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
+                  title={boolDeleted ? 'Will be deleted on Save' : boolNew ? 'New row, inserted on Save' : 'Click to select the row (Ctrl / Shift for several)'}
+                  className={`shrink-0 cursor-pointer border-r border-line px-2 text-right leading-6 ${
+                    boolDeleted ? 'font-semibold text-danger' : boolNew ? 'font-semibold text-success' : boolPicked ? 'bg-accent font-semibold text-accent-fg' : 'text-muted'}`}>
+                  {boolDeleted ? '−' : boolNew ? '+' : objItem.index + 1}
                 </div>
-                {arrRow.map((objValue, intCol) => {
+                {arrRow.map((objLoaded, intCol) => {
                   const boolSelected = objSelected?.r === intRow && objSelected.c === intCol;
+                  const strCell = `${intRow}:${intCol}`;
+                  const boolChanged = !!objEdit && objEdit.dicChanges.has(strCell);
+                  const objValue = boolChanged ? objEdit.dicChanges.get(strCell) ?? null : objLoaded;
+                  const boolCanEdit = !!objEdit && objEdit.arrEditable[intCol] && objEdit.canEdit(intRow);
+                  if (objEditing?.r === intRow && objEditing.c === intCol) {
+                    const strType = objResult.columns[intCol].dataType;
+                    return (
+                      // Leaving the cell (not for its own calendar button) ends the edit.
+                      <div key={intCol} style={{ width: arrWidths[intCol] }} className="flex shrink-0 items-center border-r border-line/60 bg-panel"
+                        onBlur={objEvent => { if (!refPickerOpen.current && !objEvent.currentTarget.contains(objEvent.relatedTarget)) commitEdit(); }}>
+                        <input ref={refEditBox} autoFocus value={objEditing.text} placeholder="NULL" aria-label={`Edit ${objResult.columns[intCol].name}`}
+                          onChange={objEvent => setObjEditing({ ...objEditing, text: objEvent.target.value })}
+                          onKeyDown={objEvent => {
+                            if (objEvent.key === 'Enter') commitEdit();
+                            else if (objEvent.key === 'Escape') closeEdit();
+                          }}
+                          className="h-6 min-w-0 flex-1 border border-accent bg-panel px-1.5 font-mono text-xs outline-none placeholder:italic placeholder:text-muted/60" />
+                        {isDateType(strType) && (
+                          // The picker lives outside the cell (a popover): while it is open, focus leaving the cell is not the end of the edit.
+                          <DatePickerButton boolSmall strValue={objEditing.text}
+                            boolDateOnly={/^date$/i.test(strType) && objEditing.text !== '' && !/\d{2}:\d{2}/.test(objEditing.text)}
+                            onOpenChange={boolOpen => {
+                              refPickerOpen.current = boolOpen;
+                              if (!boolOpen) requestAnimationFrame(() => refEditBox.current?.focus());
+                            }}
+                            onPick={strPicked => setObjEditing({ ...objEditing, text: strPicked })} />
+                        )}
+                      </div>
+                    );
+                  }
                   return (
-                    <div key={intCol} style={{ width: arrWidths[intCol] }}
-                      onClick={() => { setObjSelected({ r: intRow, c: intCol }); onSelectRow?.(intRow); }}
-                      title={objValue === null ? 'NULL' : display(objValue)}
+                    <div key={intCol} style={{ width: arrWidths[intCol] }} data-cell={strCell}
+                      onClick={objEvent => { setObjSelected({ r: intRow, c: intCol }); pickCell(intRow, objEvent); onSelectRow?.(intRow); }}
+                      onDoubleClick={boolCanEdit ? () => { beginEdit(intRow, intCol); } : undefined}
                       className={`shrink-0 truncate border-r border-line/60 px-2 leading-6 ${arrNumeric[intCol] ? 'text-right' : ''} ${
-                        boolSelected ? 'bg-accent/15 outline outline-1 -outline-offset-1 outline-accent' : ''}`}>
-                      {objValue === null ? <span className="text-muted italic">NULL</span> : display(objValue)}
+                        boolSelected ? 'bg-accent/15 outline outline-1 -outline-offset-1 outline-accent' : ''} ${
+                        boolChanged ? 'bg-env-amber/25 font-semibold' : ''} ${objEdit && !objEdit.arrEditable[intCol] ? 'text-muted opacity-45' : ''} ${boolCanEdit ? 'cursor-cell' : ''}`}>
+                      {objValue === null || objValue === undefined ? <span className="text-muted italic">{boolNew && boolCanEdit ? 'default' : 'NULL'}</span> : display(objValue)}
                     </div>
                   );
                 })}

@@ -415,6 +415,16 @@ internal static class DbStudioApi
             return Results.NoContent();
         });
 
+        // Where the columns of a SELECT come from, for editing in the grid. The statement is not run.
+        objApi.MapPost("/query/describe", async (DescribeRequest objRequest, IConnectionStore objStore, ProviderRegistry objProviders,
+            HttpContext objHttp) =>
+        {
+            if (objStore.Get(objRequest.ConnectionId) is not { } objProfile) return Results.NotFound();
+            if (string.IsNullOrWhiteSpace(objRequest.Sql)) return Results.BadRequest(new QueryError("Nothing to describe."));
+            try { return Results.Ok(await objProviders.Get(objProfile.Kind).DescribeResultAsync(objProfile, objRequest.Sql, objHttp.RequestAborted)); }
+            catch (Exception objEx) { return Results.BadRequest(Describe(objProviders, objProfile.Kind, objEx)); }
+        });
+
         objApi.MapPost("/query/{guidQueryId:guid}/cancel", (Guid guidQueryId, QueryRegistry objQueries) =>
             objQueries.Cancel(guidQueryId) ? Results.Accepted() : Results.NotFound());
 

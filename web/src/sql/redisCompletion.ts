@@ -1,5 +1,6 @@
 /** Autocomplete for Redis consoles (language "redis"): command names at the start of a line. */
 import type * as Monaco from 'monaco-editor';
+import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';
 import { getSnippets } from './snippets';
 
 const COMMANDS = `PING INFO DBSIZE SELECT SCAN TYPE TTL PTTL EXPIRE PEXPIRE PERSIST EXISTS DEL UNLINK RENAME COPY OBJECT MEMORY
@@ -31,8 +32,8 @@ export function registerRedisCompletion(objMonaco: typeof Monaco) {
       const objKind = objMonaco.languages.CompletionItemKind;
       return {
         suggestions: [
-          ...getSnippets().filter(objSnippet => objSnippet.prefix).map(objSnippet => ({
-            label: objSnippet.prefix, kind: objKind.Snippet, detail: objSnippet.name, documentation: objSnippet.body,
+          ...[...getSnippets().filter(objSnippet => objSnippet.prefix), ...builtinSnippets('redis', getSnippets())].map(objSnippet => ({
+            label: snippetLabel(objSnippet), kind: objKind.Snippet, documentation: { value: '```text\n' + snippetCode(objSnippet.body) + '\n```' },
             insertText: objSnippet.body, insertTextRules: objMonaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
             range: objRange, sortText: '0' + objSnippet.prefix,
           })),

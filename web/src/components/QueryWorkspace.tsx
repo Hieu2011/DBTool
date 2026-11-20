@@ -2,26 +2,27 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type * as Monaco from 'monaco-editor';
 import { monaco } from '../monaco';
 import { api, ApiError } from '../api';
-import { metadataFor, registerSqlCompletion } from '../sql/completion';
+import { metadataFor, registerSqlCompletion, schemaLoaderFor } from '../sql/completion';
 import { dialectOf, editorLanguage, hasTransactions, isSqlKind } from '../sql/dialect';
 import { registerRedisCompletion } from '../sql/redisCompletion';
 import { foldByStatement, registerSqlFolding } from '../sql/folding';
 import { registerMongoCompletion } from '../sql/mongoCompletion';
-import { registerSqlHover, routinesFor } from '../sql/hover';
+import { objectAt, registerSqlHover, routinesFor } from '../sql/hover';
 import { formatSql, isUnfilteredWrite } from '../sql/format';
 import { splitStatements, statementAt } from '../sql/statements';
-import type { Connection, QueryError, QueryResult, SchemaMetadata } from '../types';
+import type { Connection, DbObjectInfo, QueryError, QueryResult, SchemaMetadata } from '../types';
 import { KIND_LABEL } from '../types';
 import { envVar } from '../envColor';
 import { CodeView } from './CodeView';
 import { ResultGrid } from './ResultGrid';
+import { EditableResult } from './EditableResult';
 import { IconCheck, IconComment, IconFormat, IconPlay, IconPlayAll, IconPlug, IconRefresh, IconStop, IconUndo, IconUnplug } from './icons';
 
 registerSqlCompletion(monaco);
 registerSqlFolding(monaco);
 registerMongoCompletion(monaco);
-registerSqlHover(monaco);
 registerRedisCompletion(monaco);
+registerSqlHover(monaco);
 
 export const FORMAT_ACTION = 'dbstudio.formatSql';
 
@@ -30,7 +31,9 @@ interface Props {
   objConnection: Connection;
   boolActive: boolean;
   objMetadata: SchemaMetadata | undefined;
-  loadMetadata: (strId: string, boolRefresh?: boolean) => Promise<SchemaMetadata>;
+  loadMetadata: (strId: string, boolRefresh?: boolean, strSchema?: string) => Promise<SchemaMetadata>;
+  /** F12 on a table / routine name: opens its object tab. */
+  onOpenObject?: (objObject: DbObjectInfo) => void;
   /** Lets the app warn before closing a tab that has uncommitted work. */
   onTransactionChange: (strTabId: string, boolOpen: boolean) => void;
   /** Gives the app menu a way to drive this editor; null when the tab closes. */
@@ -86,8 +89,12 @@ const runLabel = ({ result: objResult, error: objError }: StatementRun) => {
 };
 
 export function QueryWorkspace({
-  strTabId, objConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun,
+  strTabId, objConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, onOpenObject,
 }: Props) {
+  const refOnOpenObject = useRef(onOpenObject);
+  refOnOpenObject.current = onOpenObject;
+  const refLoadMetadata = useRef(loadMetadata);
+  refLoadMetadata.current = loadMetadata;
   const refOnContentChange = useRef(onContentChange);
   refOnContentChange.current = onContentChange;
   const refAutoRan = useRef(false);
@@ -204,6 +211,51 @@ export function QueryWorkspace({
         objEditor.pushUndoStop();
       },
     });
+    const goToObject = async (objPosition: monaco.Position | null) => {
+      if (!objPosition) return;
+      let objFound = objectAt(objModel, objPosition);
+      if (objFound && 'loadSchema' in objFound) {
+        await refLoadMetadata.current(objConnection.id, false, objFound.loadSchema).catch(() => {});
+        objFound = objectAt(objModel, objPosition);
+      }
+      if (objFound && !('loadSchema' in objFound)) refOnOpenObject.current?.(objFound);
+    };
+    // F12 (and the right-click menu): the table, view or routine under the cursor opens in its own tab.
+    objEditor.addAction({
+      id: 'dbstudio.goToObject',
+      label: 'Go to object',
+      keybindings: [monaco.KeyCode.F12],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 1,
+      run: () => { void goToObject(objEditor.getPosition()); },
+    });
+    // With Ctrl held, a name that can be opened is underlined and takes the hand cursor, like a link.
+    const objLink = objEditor.createDecorationsCollection();
+    let strLinkAt = '';
+    const clearLink = () => { if (strLinkAt) { strLinkAt = ''; objLink.clear(); } };
+    objEditor.onMouseMove(objEvent => {
+      const objPosition = objEvent.target.position;
+      const objWord = objPosition && objEvent.event.ctrlKey && objEvent.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT
+        ? objModel.getWordAtPosition(objPosition) : null;
+      if (!objPosition || !objWord) return clearLink();
+      const strAt = `${objPosition.lineNumber}:${objWord.startColumn}:${objWord.word}`;
+      if (strAt === strLinkAt) return;
+      clearLink();
+      if (!objectAt(objModel, objPosition)) return;
+      strLinkAt = strAt;
+      objLink.set([{
+        range: new monaco.Range(objPosition.lineNumber, objWord.startColumn, objPosition.lineNumber, objWord.endColumn),
+        options: { inlineClassName: 'dbstudio-link' },
+      }]);
+    });
+    objEditor.onMouseLeave(clearLink);
+    objEditor.onKeyUp(objEvent => { if (objEvent.keyCode === monaco.KeyCode.Ctrl) clearLink(); });
+    objModel.onDidChangeContent(clearLink);
+    // Ctrl + click on a name does the same.
+    objEditor.onMouseDown(objEvent => {
+      if (objEvent.event.ctrlKey && objEvent.event.leftButton && objEvent.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT)
+        void goToObject(objEvent.target.position);
+    });
     // Written straight to the DOM: a cursor move must not re-render the result grid.
     const showCursor = () => {
       const objPosition = objEditor.getPosition();
@@ -219,10 +271,12 @@ export function QueryWorkspace({
       setTimeout(() => refRun.current(true), 0); // after the editor is in place
     }
     const fnUnregister = metadataFor(objModel, () => refMetadata.current);
+    const fnForgetLoader = schemaLoaderFor(objModel, strSchema => refLoadMetadata.current(objConnection.id, false, strSchema));
     const fnForgetRoutines = routinesFor(objModel, objRoutine => api.routineInfo(objConnection.id, objRoutine));
     return () => {
       fnUnregister();
       fnForgetRoutines();
+      fnForgetLoader();
       objEditor.dispose();
       objModel.dispose();
     };
@@ -573,7 +627,13 @@ export function QueryWorkspace({
               <div className="min-h-0 flex-1">
                 {objActiveResult.documents && boolJson
                   ? <CodeView strText={objActiveResult.documents.join(',\n')} strLanguage="mongodb" />
-                  : <ResultGrid key={intActiveRun} objResult={objActiveResult} />}
+                  : objActiveRun
+                    // The updates run in the tab's own session, so its transaction mode applies to them.
+                    ? (
+                      <EditableResult key={intActiveRun} objConnection={objConnection} strSql={objActiveRun.sql} objResult={objActiveResult}
+                        strSessionId={strSessionId} boolAutoCommit={boolAutoCommit} intMaxRows={intMaxRows} onRan={() => { if (!boolAutoCommit) setBoolTxOpen(true); }} />
+                    )
+                    : <ResultGrid key={intActiveRun} objResult={objActiveResult} />}
               </div>
             </div>
           )}

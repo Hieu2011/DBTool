@@ -97,6 +97,17 @@ public sealed record SchemaMetadata(
 public sealed record ObjectSection(string Title, QueryResult Result);
 
 /// <summary>Mode: IN, OUT, INOUT, or RETURN (a function's return value).</summary>
+/// <summary>Where a result column comes from. Schema / Table / Column are null for an expression.</summary>
+public sealed record ColumnOrigin(string Name, string? Schema, string? Table, string? Column);
+
+/// <summary>A table some result columns come from. KeyColumns: its primary key, empty when it has none.</summary>
+public sealed record EditableTable(string Schema, string Name, List<string> KeyColumns);
+
+/// <summary>Columns: one entry per result column, in order.</summary>
+public sealed record ResultOrigin(List<ColumnOrigin> Columns, List<EditableTable> Tables);
+
+public sealed record DescribeRequest(Guid ConnectionId, string Sql);
+
 public sealed record RoutineParameter(string Name, string DataType, string Mode, int Position);
 
 public sealed record RoutineInfo(List<RoutineParameter> Parameters);
