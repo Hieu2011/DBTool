@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "DbStudio": {
+      "commandName": "Project"
+    },
+    "DbStudio (dev, Vite)": {
+      "commandName": "Project",
+      "commandLineArgs": "--dev"
+    }
+  }
+}
