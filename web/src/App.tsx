@@ -406,6 +406,7 @@ export default function App() {
             objConnection={objActiveConnection}
             onOpenObject={objObject => openObject(objActiveConnection.id, objObject)}
             onOpenSql={(strSql, boolAutoRun) => newQueryTab(objActiveConnection.id, strSql, boolAutoRun)}
+            objReveal={objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null}
           />
         )}
         {objActiveConnection && objActiveConnection.kind !== 'Redis' && (

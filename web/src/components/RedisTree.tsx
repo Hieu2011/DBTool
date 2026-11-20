@@ -11,6 +11,8 @@ interface Props {
   onOpenObject: (objObject: DbObjectInfo) => void;
   /** Opens a console tab holding the commands. */
   onOpenSql: (strCommands: string, boolAutoRun?: boolean) => void;
+  /** The key of the active tab (schema `dbN`): the tree switches to its database, opens its folders and shows it. */
+  objReveal?: DbObjectInfo | null;
 }
 
 const ROW_H = 22;
@@ -34,7 +36,12 @@ const toPattern = (strFilter: string) => {
 };
 
 /** Keys of one Redis database, grouped into folders at each `:`. Loaded page by page with SCAN. */
-export function RedisTree({ objConnection, onOpenObject, onOpenSql }: Props) {
+export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal }: Props) {
+  // Row of the active tab's key; strScrollTo: still to be scrolled into view.
+  const [strCurrent, setStrCurrent] = useState<string | null>(null);
+  const [strScrollTo, setStrScrollTo] = useState<string | null>(null);
+  const refRevealed = useRef<string | null>(null); // one reveal per tab switch: the user may then browse away
+  const refSwitched = useRef<string | null>(null);
   const refScroller = useRef<HTMLDivElement>(null);
   const [arrDatabases, setArrDatabases] = useState<RedisDatabaseInfo[]>([]);
   const [intDatabase, setIntDatabase] = useState(() => Number.parseInt(objConnection.database, 10) || 0);
@@ -78,6 +85,37 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql }: Props) {
     loadDatabases();
     loadKeys(intDatabase, strPattern, '0', false);
   };
+
+  // Follows the active tab's key.
+  const strRevealId = objReveal ? `${objReveal.schema}|${objReveal.name}` : null;
+  useEffect(() => {
+    const intRevealDb = objReveal ? Number(/^db(\d+)$/.exec(objReveal.schema)?.[1] ?? NaN) : NaN;
+    if (!objReveal || !strRevealId || Number.isNaN(intRevealDb)) { refRevealed.current = null; return setStrCurrent(null); }
+    if (refRevealed.current === strRevealId) return;
+    if (intRevealDb !== intDatabase) {
+      if (refSwitched.current === strRevealId) return; // already sent there once; the user chose another database since
+      refSwitched.current = strRevealId;
+      setHsExpanded(new Set());
+      return setIntDatabase(intRevealDb);
+    }
+    if (strState !== 'idle') return; // a scan is running: its keys come first
+    const strKey = objReveal.name;
+    if (!arrKeys.some(objKey => objKey.key === strKey)) {
+      // Not in the pages scanned so far. It is open in a tab, so it exists: list it, unless a filter says otherwise.
+      if (strPattern !== '*') { refRevealed.current = strRevealId; return setStrCurrent(null); }
+      return setArrKeys(arrPrev => [...arrPrev, { key: strKey, type: objReveal.type }]);
+    }
+    refRevealed.current = strRevealId;
+    const arrParts = strKey.split(SEPARATOR).slice(0, -1);
+    setHsExpanded(hsPrev => {
+      const hsNext = new Set(hsPrev);
+      arrParts.forEach((_, intPart) => hsNext.add(`${arrParts.slice(0, intPart + 1).join(SEPARATOR)}${SEPARATOR}`));
+      return hsNext;
+    });
+    setStrCurrent(`k:${strKey}`);
+    setStrScrollTo(`k:${strKey}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strRevealId, intDatabase, arrKeys, strState, strPattern]);
 
   // ---- folders ----
   const objRoot = useMemo(() => {
@@ -124,6 +162,15 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql }: Props) {
     estimateSize: () => ROW_H,
     overscan: 20,
   });
+
+  useEffect(() => {
+    if (!strScrollTo) return;
+    const intIndex = arrRows.findIndex(objRow => objRow.path === strScrollTo);
+    if (intIndex < 0) return;
+    objVirtual.scrollToIndex(intIndex, { align: 'center' });
+    setStrScrollTo(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strScrollTo, arrRows]);
 
   const toggle = (strPath: string) => setHsExpanded(hsPrev => {
     const hsNext = new Set(hsPrev);
@@ -189,7 +236,8 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql }: Props) {
             const objRow = arrRows[objItem.index];
             return (
               <div key={objRow.path}
-                className="absolute left-0 flex w-full items-center gap-1.5 pr-1.5 hover:bg-hover"
+                className={`absolute left-0 flex w-full items-center gap-1.5 pr-1.5 hover:bg-hover ${
+                  objRow.path === strCurrent ? 'bg-accent/15 shadow-[inset_2px_0_0_var(--accent)]' : ''}`}
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)`, paddingLeft: 8 + objRow.depth * 12 }}
                 title={objRow.kind === 'key' ? objRow.item.key : objRow.path}
                 onClick={objRow.kind === 'folder' ? () => toggle(objRow.path) : () => open(objRow.item)}
