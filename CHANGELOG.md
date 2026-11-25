@@ -2,6 +2,10 @@
 
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
+## 1.1.4 — 2026-11-25
+
+- Gợi ý tự bật lại sau mỗi lần gõ hoặc xoá (gõ sai, xoá đi gõ lại không cần Ctrl+Space nữa)
+
 ## 1.1.3 — 2026-11-25
 
 - Nút Update and restart dùng được cả khi file exe không tên DbStudio.exe (vd file tải từ cloud DbStudio-1.1.2.exe)

@@ -277,6 +277,26 @@ export function QueryWorkspace({
     };
     objEditor.onDidChangeCursorPosition(showCursor);
     objModel.onDidChangeContent(() => refOnContentChange.current?.(strTabId));
+    // Suggestions follow every edit. Monaco alone opens them only for a character typed at the end of a word: not after
+    // Backspace, not inside a word. So whenever the text changes and the list is closed, ask again (quietly: no
+    // "No suggestions" box).
+    let intSuggestTimer: number | undefined;
+    objModel.onDidChangeContent(objEvent => {
+      clearTimeout(intSuggestTimer);
+      if (objEvent.isFlush || objEvent.isUndoing || objEvent.isRedoing || !objEditor.hasTextFocus()) return;
+      // One typed character or a deletion only: a pasted text or an accepted suggestion must not reopen the list.
+      if (objEvent.changes.some(objChange => objChange.text.length > 1)) return;
+      intSuggestTimer = window.setTimeout(() => {
+        const arrSelections = objEditor.getSelections();
+        const objPosition = objEditor.getPosition();
+        if (!objPosition || arrSelections?.length !== 1 || !arrSelections[0].isEmpty()) return;
+        // Right after a name or a dot; nothing to offer after a blank or a bracket.
+        if (!/[\w$#.]$/.test(objModel.getLineContent(objPosition.lineNumber).slice(0, objPosition.column - 1))) return;
+        const objSuggest = objEditor.getContribution('editor.contrib.suggestController') as { model?: { state?: number } } | null;
+        if (objSuggest?.model?.state) return; // already open: Monaco filters it itself
+        objEditor.trigger('dbstudio', 'editor.action.triggerSuggest', { auto: true });
+      }, 120);
+    });
     showCursor();
     refEditor.current = objEditor;
     if (boolAutoRun && !refAutoRan.current) {
