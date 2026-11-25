@@ -86,7 +86,7 @@ export interface RoutineResult { results: ObjectSection[]; outputs: RoutineOutpu
 export interface ObjectSection { title: string; result: QueryResult }
 export interface ObjectDetail { sections: ObjectSection[]; ddl?: string | null; ddlError?: string | null; comment?: string | null }
 
-export interface UpdateConfig { url?: string | null; hasPassword: boolean; currentVersion: string; canApply: boolean }
+export interface UpdateConfig { url?: string | null; hasPassword: boolean; currentVersion: string; canApply: boolean; builtOn?: string | null }
 export interface UpdateInfo { currentVersion: string; latestVersion: string; available: boolean; notes?: string | null; releasedOn?: string | null }
 
 export const KIND_LABEL: Record<DbKind, string> = {

@@ -5,6 +5,7 @@ Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung c�
 ## 1.1.1 — 2026-11-25
 
 - Form Updates hiện ngày phát hành của bản trên thư mục update
+- Form Updates hiện ngày của bản đang chạy ngay dưới dòng Author
 - Bản đầu tiên phát hành tự động khi push (để thử nút Update and restart)
 
 ## 1.1.0 — 2026-11-25

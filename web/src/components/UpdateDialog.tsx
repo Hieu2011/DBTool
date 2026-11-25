@@ -104,6 +104,9 @@ export function UpdateDialog({ strUnsaved, onClose }: Props) {
               )}
             </h2>
             <p className="mt-0.5 text-xs text-muted">Author: <span className="text-fg">{AUTHOR}</span></p>
+            {objConfig?.builtOn && (
+              <p className="mt-0.5 text-xs text-muted">Version date: <span className="text-fg tabular-nums">{dayText(objConfig.builtOn)}</span></p>
+            )}
           </div>
           <button type="button" className="icon-btn" onClick={onClose} disabled={strBusy === 'apply'} aria-label="Close" title="Close (Esc)"><IconClose /></button>
         </div>

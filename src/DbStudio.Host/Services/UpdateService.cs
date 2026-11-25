@@ -9,7 +9,7 @@ using System.Text.RegularExpressions;
 namespace DbStudio.Host.Services;
 
 /// <summary>Where updates come from, as the UI sees it. The password never leaves the server.</summary>
-public sealed record UpdateConfigDto(string? Url, bool HasPassword, string CurrentVersion, bool CanApply);
+public sealed record UpdateConfigDto(string? Url, bool HasPassword, string CurrentVersion, bool CanApply, string? BuiltOn);
 
 /// <summary>Password null = keep the saved one; empty = the link has none.</summary>
 public sealed record UpdateConfigInput(string? Url, string? Password);
@@ -62,6 +62,12 @@ internal sealed partial class UpdateService
 
     public static string CurrentVersion => Display(typeof(UpdateService).Assembly.GetName().Version ?? new Version(0, 0, 0));
 
+    /// <summary>The day this exe was built (yyyy-MM-dd), stamped by the csproj.</summary>
+    private static string? BuiltOn { get; } = typeof(UpdateService).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .OfType<System.Reflection.AssemblyMetadataAttribute>()
+        .FirstOrDefault(objItem => objItem.Key == "BuildDate")?.Value;
+
     public UpdateProgress? Progress => _objProgress;
 
     /// <summary>The published single-file exe. Null for a debug / dotnet run build: nothing to replace there.</summary>
@@ -75,7 +81,7 @@ internal sealed partial class UpdateService
     public UpdateConfigDto GetConfig()
     {
         var objStored = Load();
-        return new UpdateConfigDto(objStored.Url, !string.IsNullOrEmpty(objStored.ProtectedPassword), CurrentVersion, ExePath is not null);
+        return new UpdateConfigDto(objStored.Url, !string.IsNullOrEmpty(objStored.ProtectedPassword), CurrentVersion, ExePath is not null, BuiltOn);
     }
 
     public UpdateConfigDto SaveConfig(UpdateConfigInput objInput)
