@@ -2,6 +2,11 @@
 
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
+## 1.1.1 — 2026-11-25
+
+- Form Updates hiện ngày phát hành của bản trên thư mục update
+- Bản đầu tiên phát hành tự động khi push (để thử nút Update and restart)
+
 ## 1.1.0 — 2026-11-25
 
 - Bản phát hành đầu tiên qua kênh update

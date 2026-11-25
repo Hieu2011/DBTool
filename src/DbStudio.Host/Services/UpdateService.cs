@@ -14,7 +14,8 @@ public sealed record UpdateConfigDto(string? Url, bool HasPassword, string Curre
 /// <summary>Password null = keep the saved one; empty = the link has none.</summary>
 public sealed record UpdateConfigInput(string? Url, string? Password);
 
-public sealed record UpdateInfo(string CurrentVersion, string LatestVersion, bool Available, string? Notes);
+/// <summary>ReleasedOn: the day the version in the update folder was published (yyyy-MM-dd), when its manifest says.</summary>
+public sealed record UpdateInfo(string CurrentVersion, string LatestVersion, bool Available, string? Notes, string? ReleasedOn);
 
 public sealed record UpdateProgress(long Received, long? Total);
 
@@ -27,7 +28,7 @@ internal sealed class UpdateException(string strMessage, string? strCode = null)
 
 /// <summary>
 /// Self-update from a public share link of a Nextcloud / ownCloud folder (https://host/index.php/s/TOKEN) that holds
-/// version.json ({ "version", "file", "sha256", "notes" }) and the exe. The link is a setting, never part of the code;
+/// version.json ({ "version", "file", "sha256", "date", "notes" }) and the exe. The link is a setting, never part of the code;
 /// its password is kept with DPAPI in %APPDATA%\DbStudio\update.json. Nothing is checked or downloaded unless asked.
 /// </summary>
 internal sealed partial class UpdateService
@@ -39,7 +40,7 @@ internal sealed partial class UpdateService
     private static readonly HttpClient Http = CreateClient();
 
     private sealed record Stored(string? Url, string? ProtectedPassword);
-    private sealed record Manifest(string? Version, string? File, string? Sha256, string? Notes);
+    private sealed record Manifest(string? Version, string? File, string? Sha256, string? Notes, string? Date);
 
     private readonly string _strFile;
     private readonly object _objLock = new();
@@ -98,7 +99,8 @@ internal sealed partial class UpdateService
     {
         var (objManifest, objLatest) = await ReadManifestAsync(objCancelToken).ConfigureAwait(false);
         var objCurrent = typeof(UpdateService).Assembly.GetName().Version ?? new Version(0, 0, 0);
-        return new UpdateInfo(CurrentVersion, Display(objLatest), Normalize(objLatest) > Normalize(objCurrent), objManifest.Notes);
+        return new UpdateInfo(CurrentVersion, Display(objLatest), Normalize(objLatest) > Normalize(objCurrent), objManifest.Notes,
+            DateOnly.TryParseExact(objManifest.Date, "yyyy-MM-dd", out var dtReleased) ? dtReleased.ToString("yyyy-MM-dd") : null);
     }
 
     /// <summary>Downloads the new exe, checks its SHA-256, puts it in place of the running one and starts it.</summary>

@@ -41,6 +41,7 @@ $manifest = [ordered]@{
     version = "$version"
     file    = 'DbStudio.exe'
     sha256  = (Get-FileHash "$root\dist\DbStudio.exe" -Algorithm SHA256).Hash
+    date    = (Get-Date -Format 'yyyy-MM-dd')
     notes   = $Notes
 }
 [IO.File]::WriteAllText("$root\dist\version.json", ($manifest | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))

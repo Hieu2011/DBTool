@@ -12,6 +12,8 @@ interface Props {
 }
 
 const errorText = (objEx: unknown) => (objEx instanceof ApiError ? objEx.detail.message : (objEx as Error).message);
+/** 2026-11-25 -> 25/11/2026 */
+const dayText = (strDate: string) => strDate.split('-').reverse().join('/');
 const megabytes = (intBytes: number) => `${(intBytes / 1048576).toFixed(0)} MB`;
 
 /** Help > Check for updates: the share link the new versions come from, the check, and the update itself. */
@@ -144,13 +146,13 @@ export function UpdateDialog({ strUnsaved, onClose }: Props) {
         {objInfo && !objInfo.available && strBusy === null && (objInfo.latestVersion === objInfo.currentVersion
           ? (
             <p role="status" className="mx-4 mb-3 flex items-center gap-2 rounded border border-success/40 bg-success/10 px-3 py-2 text-xs text-success">
-              <IconCheck intSize={14} /> You have the latest version (v{objInfo.currentVersion}), the same as the update folder.
+              <IconCheck intSize={14} /> You have the latest version (v{objInfo.currentVersion}{objInfo.releasedOn ? `, released ${dayText(objInfo.releasedOn)}` : ''}), the same as the update folder.
             </p>
           )
           : (
             // Only the publisher's machine gets here: the build was not uploaded yet.
             <div role="status" className="mx-4 mb-3 rounded border border-env-amber/50 bg-env-amber/10 px-3 py-2 text-xs">
-              <div className="font-semibold">This version (v{objInfo.currentVersion}) is newer than the update folder (v{objInfo.latestVersion})</div>
+              <div className="font-semibold">This version (v{objInfo.currentVersion}) is newer than the update folder (v{objInfo.latestVersion}{objInfo.releasedOn ? `, released ${dayText(objInfo.releasedOn)}` : ''})</div>
               <div className="mt-0.5 text-muted">
                 Other machines will not see v{objInfo.currentVersion} until DbStudio.exe and version.json are uploaded to the folder.
               </div>
@@ -162,7 +164,9 @@ export function UpdateDialog({ strUnsaved, onClose }: Props) {
             <div className="flex items-center gap-2">
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] font-semibold">Version v{objInfo.latestVersion} is available</div>
-                <div className="text-muted">You have v{objInfo.currentVersion}.</div>
+                <div className="text-muted">
+                  {objInfo.releasedOn && <>Released {dayText(objInfo.releasedOn)} · </>}You have v{objInfo.currentVersion}.
+                </div>
               </div>
               <button className="btn btn-primary shrink-0 whitespace-nowrap" onClick={apply} disabled={strBusy !== null || boolRestarting || !objConfig?.canApply}
                 title={objConfig?.canApply ? 'Download it, replace DbStudio.exe and restart' : 'Only the published DbStudio.exe can update itself'}>

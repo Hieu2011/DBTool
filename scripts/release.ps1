@@ -105,7 +105,7 @@ Invoke-WebRequest -Uri "$folderUrl/$exeName" -Method Put -InFile $exe -Headers $
 $uploaded = [long](Invoke-WebRequest -Uri "$folderUrl/$exeName" -Method Head -Headers $headers -UseBasicParsing).Headers['Content-Length']
 if ($uploaded -ne $size) { throw "The upload is incomplete ($uploaded of $size bytes). version.json was not changed, so nobody gets a broken update." }
 
-$cloudManifest = [ordered]@{ version = $manifest.version; file = $exeName; sha256 = $manifest.sha256; notes = $manifest.notes } | ConvertTo-Json
+$cloudManifest = [ordered]@{ version = $manifest.version; file = $exeName; sha256 = $manifest.sha256; date = $manifest.date; notes = $manifest.notes } | ConvertTo-Json
 Invoke-WebRequest -Uri "$folderUrl/version.json" -Method Put -Body ([Text.Encoding]::UTF8.GetBytes($cloudManifest)) -Headers $headers -ContentType 'application/json' -UseBasicParsing | Out-Null
 
 # CHANGELOG.md keeps what version.json forgets at the next release. One entry per version: an existing one is left alone.
