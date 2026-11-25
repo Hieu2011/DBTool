@@ -32,6 +32,13 @@ public sealed partial class OracleProvider : AdoProviderBase
         ORDER BY c.owner, c.table_name, c.column_id
         """;
 
+    protected override string RowCountsSql => """
+        SELECT owner, table_name, num_rows
+        FROM all_tables
+        WHERE owner = NVL(:schema, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))
+          AND num_rows IS NOT NULL
+        """;
+
     protected override string SchemasSql => "SELECT username FROM all_users ORDER BY username";
 
     protected override string CurrentSchemaSql => "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual";

@@ -9,8 +9,9 @@ internal sealed class MainForm : Form
     private readonly WebView2 _objWeb = new() { Dock = DockStyle.Fill };
 
     public MainForm(string strUrl, string? strToken, bool boolDev, ExportTargets objExportTargets, SqlFiles objSqlFiles,
-        SettingsStore objSettings)
+        SettingsStore objSettings, UpdateService objUpdates)
     {
+        objUpdates.Attach(this);
         objExportTargets.Attach(this);
         objSqlFiles.Attach(this);
         Text = boolDev ? "DbStudio (dev)" : "DbStudio";

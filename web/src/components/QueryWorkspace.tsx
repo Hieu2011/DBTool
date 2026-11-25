@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type * as Monaco from 'monaco-editor';
 import { monaco } from '../monaco';
 import { api, ApiError } from '../api';
+import { showToast } from '../toast';
 import { metadataFor, registerSqlCompletion, schemaLoaderFor } from '../sql/completion';
 import { dialectOf, editorLanguage, hasTransactions, isSqlKind } from '../sql/dialect';
 import { registerRedisCompletion } from '../sql/redisCompletion';
@@ -141,6 +142,7 @@ export function QueryWorkspace({
         if (refOpening.current !== objOpening) return; // a newer attempt owns the state
         setStrSession('failed');
         showError('CONNECT', objEx);
+        showToast('error', `${objConnection.name}: connection failed`, toQueryError(objEx).message);
       },
     );
     refOpening.current = objOpening;

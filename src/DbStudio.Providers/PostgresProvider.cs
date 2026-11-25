@@ -42,6 +42,27 @@ public sealed partial class PostgresProvider : AdoProviderBase
         ORDER BY n.nspname, c.relname, a.attnum
         """;
 
+    // Statistics are useless for small tables (never analyzed, or reset): those are counted for real, which is
+    // cheap under 4 MB. Bigger ones use reltuples / the live-tuple counter; 0 there means unknown.
+    protected override string RowCountsSql => """
+        SELECT t.nspname, t.relname,
+               CASE WHEN t.small
+                    THEN (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint
+                    ELSE NULLIF(t.estimate, 0) END
+        FROM (
+            SELECT n.nspname, c.relname,
+                   c.relkind IN ('r', 'm') AND pg_relation_size(c.oid) <= 4194304 AND has_table_privilege(c.oid, 'SELECT') AS small,
+                   GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, 0)) AS estimate
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+            WHERE c.relkind IN ('r', 'p', 'm')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND n.nspname NOT LIKE 'pg_toast%'
+              AND n.nspname NOT LIKE 'pg_temp%'
+        ) t
+        """;
+
     public override QueryError DescribeError(Exception objEx) => objEx switch
     {
         PostgresException objPgEx => new QueryError(

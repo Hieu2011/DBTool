@@ -70,7 +70,11 @@ public sealed record QueryError(string Message, int? Position = null, string? Co
 
 public sealed record ColumnMeta(string Name, string DataType);
 
-public sealed record TableMeta(string Schema, string Name, string Type, List<ColumnMeta> Columns);
+public sealed record TableMeta(string Schema, string Name, string Type, List<ColumnMeta> Columns)
+{
+    /// <summary>Estimated row count from the catalog statistics; null when the database has none.</summary>
+    public long? Rows { get; set; }
+}
 
 /// <summary>Function, procedure, sequence, package... Signature tells overloads apart (PostgreSQL).</summary>
 public sealed record DbObjectInfo(string Schema, string Name, string Type, string? Signature = null);

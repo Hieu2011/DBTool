@@ -6,9 +6,9 @@ import { exportFileName, toCsv, toXlsx } from '../exportData';
 import { DatePickerButton, isDateType } from './DatePicker';
 import { IconDownload, IconFilter, IconPencil } from './icons';
 
-const ROW_H = 24;
+const ROW_H = 28;
 const INDEX_W = 56;
-const CHAR_W = 7.4; // Cascadia Mono 12px
+const CHAR_W = 8; // Cascadia Mono 13px
 
 const NUMERIC = /^(int|integer|bigint|smallint|numeric|decimal|number|float|double|real|money|binary_(float|double))/i;
 
@@ -68,7 +68,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
   const hsPicked = hsRows ?? hsInner;
   const refAnchor = useRef<number | null>(null); // where a Shift+click range starts
   // The cell being typed in.
-  const [objEditing, setObjEditing] = useState<{ r: number; c: number; text: string } | null>(null);
+  const [objEditing, setObjEditing] = useState<{ r: number; c: number; text: string; readOnly?: boolean } | null>(null);
   const refEditClosed = useRef(false); // Enter / Escape already ended the edit: the blur that follows must not commit again
   const refScroller = useRef<HTMLDivElement>(null);
   // r is the row's index in objResult.rows, so the selection survives sorting.
@@ -83,7 +83,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     let intChars = Math.max(objColumn.name.length + 4, objColumn.dataType.length);
     for (let intRow = 0; intRow < Math.min(objResult.rows.length, 100); intRow++)
       intChars = Math.max(intChars, display(objResult.rows[intRow][intCol]).length);
-    return Math.min(Math.max(intChars * CHAR_W + 20, 72), 380);
+    return Math.min(Math.max(intChars * CHAR_W + 20, 80), 460);
   }), [objResult]);
 
   const arrNumeric = useMemo(() => objResult.columns.map(objColumn => NUMERIC.test(objColumn.dataType)), [objResult]);
@@ -156,7 +156,8 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
 
   /** Empty text is NULL. Typing the loaded value back removes the change. */
   const commitEdit = () => {
-    if (!objEditing || !objEdit || refEditClosed.current) return;
+    if (!objEditing || refEditClosed.current) return;
+    if (objEditing.readOnly || !objEdit) return closeEdit();
     refEditClosed.current = true;
     const objOriginal = objResult.rows[objEditing.r]?.[objEditing.c];
     const strValue = objEditing.text === '' ? null : objEditing.text;
@@ -176,9 +177,14 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     return objEdit?.dicChanges.has(strCell) ? objEdit.dicChanges.get(strCell) ?? null : objResult.rows[intRow]?.[intCol];
   };
 
+  /** A cell that cannot be edited opens the same box read-only, so its text can be selected and copied. */
   const beginEdit = async (intRow: number, intCol: number) => {
-    if (!objEdit || !objEdit.arrEditable[intCol] || !objEdit.canEdit(intRow)) return;
     const objValue = valueAt(intRow, intCol);
+    if (!objEdit || !objEdit.arrEditable[intCol] || !objEdit.canEdit(intRow)) {
+      if (objValue === null || objValue === undefined) return;
+      refEditClosed.current = false;
+      return setObjEditing({ r: intRow, c: intCol, text: display(objValue), readOnly: true });
+    }
     if (objEdit.start && !(await objEdit.start(intRow))) return;
     refEditClosed.current = false;
     setObjEditing({ r: intRow, c: intCol, text: objValue === null || objValue === undefined ? '' : display(objValue) });
@@ -259,7 +265,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
 
   return (
     <div ref={refScroller} tabIndex={0} onKeyDown={onKey}
-      className="h-full overflow-auto font-mono text-xs outline-none">
+      className="h-full overflow-auto font-mono text-[13px] outline-none">
       <div style={{ width: intTotalWidth, minWidth: '100%' }}>
         {/* header */}
         <div className="sticky top-0 z-10 border-b border-line bg-bg font-sans">
@@ -291,12 +297,12 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
               <div key={intCol} style={{ width: arrWidths[intCol] }} role="button" onClick={() => toggleSort(intCol)}
                 className={`shrink-0 cursor-pointer truncate border-r border-line px-2 py-1 hover:bg-hover ${arrNumeric[intCol] ? 'text-right' : ''} ${
                   objEdit?.arrEditable[intCol] ? 'bg-accent/10 shadow-[inset_0_-2px_0_var(--accent)]' : ''}`}>
-                <div className={`truncate text-[12px] font-semibold ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-45' : ''}`}>
+                <div className={`truncate text-[12px] font-semibold ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-60' : ''}`}>
                   {objEdit?.arrEditable[intCol] && <span className="mr-1 inline-block align-[-1px] text-accent"><IconPencil intSize={11} /></span>}
                   {objColumn.name}
                   {objSort?.col === intCol && <span className="ml-1 text-accent">{objSort.desc ? '▼' : '▲'}</span>}
                 </div>
-                <div className={`truncate text-[11px] text-muted ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-45' : ''}`}>{objColumn.dataType}</div>
+                <div className={`truncate text-[11px] text-muted ${objEdit && !objEdit.arrEditable[intCol] ? 'opacity-60' : ''}`}>{objColumn.dataType}</div>
               </div>
             ))}
           </div>
@@ -338,7 +344,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)` }}>
                 <div style={{ width: INDEX_W }} onClick={objEvent => { setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
                   title={boolDeleted ? 'Will be deleted on Save' : boolNew ? 'New row, inserted on Save' : 'Click to select the row (Ctrl / Shift for several)'}
-                  className={`shrink-0 cursor-pointer border-r border-line px-2 text-right leading-6 ${
+                  className={`shrink-0 cursor-pointer border-r border-line px-2 text-right leading-7 ${
                     boolDeleted ? 'font-semibold text-danger' : boolNew ? 'font-semibold text-success' : boolPicked ? 'bg-accent font-semibold text-accent-fg' : 'text-muted'}`}>
                   {boolDeleted ? '−' : boolNew ? '+' : objItem.index + 1}
                 </div>
@@ -354,14 +360,17 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                       // Leaving the cell (not for its own calendar button) ends the edit.
                       <div key={intCol} style={{ width: arrWidths[intCol] }} className="flex shrink-0 items-center border-r border-line/60 bg-panel"
                         onBlur={objEvent => { if (!refPickerOpen.current && !objEvent.currentTarget.contains(objEvent.relatedTarget)) commitEdit(); }}>
-                        <input ref={refEditBox} autoFocus value={objEditing.text} placeholder="NULL" aria-label={`Edit ${objResult.columns[intCol].name}`}
+                        <input ref={refEditBox} autoFocus value={objEditing.text} placeholder="NULL" readOnly={objEditing.readOnly}
+                          aria-label={`${objEditing.readOnly ? 'Value of' : 'Edit'} ${objResult.columns[intCol].name}`}
+                          title={objEditing.readOnly ? 'Read-only: select and copy (Esc to close)' : undefined}
+                          onFocus={objEditing.readOnly ? objEvent => objEvent.currentTarget.select() : undefined}
                           onChange={objEvent => setObjEditing({ ...objEditing, text: objEvent.target.value })}
                           onKeyDown={objEvent => {
                             if (objEvent.key === 'Enter') commitEdit();
                             else if (objEvent.key === 'Escape') closeEdit();
                           }}
-                          className="h-6 min-w-0 flex-1 border border-accent bg-panel px-1.5 font-mono text-xs outline-none placeholder:italic placeholder:text-muted/60" />
-                        {isDateType(strType) && (
+                          className="h-7 min-w-0 flex-1 border border-accent bg-panel px-2 font-mono text-[13px] outline-none placeholder:italic placeholder:text-muted/60" />
+                        {isDateType(strType) && !objEditing.readOnly && (
                           // The picker lives outside the cell (a popover): while it is open, focus leaving the cell is not the end of the edit.
                           <DatePickerButton boolSmall strValue={objEditing.text}
                             boolDateOnly={/^date$/i.test(strType) && objEditing.text !== '' && !/\d{2}:\d{2}/.test(objEditing.text)}
@@ -377,10 +386,10 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                   return (
                     <div key={intCol} style={{ width: arrWidths[intCol] }} data-cell={strCell}
                       onClick={objEvent => { setObjSelected({ r: intRow, c: intCol }); pickCell(intRow, objEvent); onSelectRow?.(intRow); }}
-                      onDoubleClick={boolCanEdit ? () => { beginEdit(intRow, intCol); } : undefined}
-                      className={`shrink-0 truncate border-r border-line/60 px-2 leading-6 ${arrNumeric[intCol] ? 'text-right' : ''} ${
+                      onDoubleClick={() => { beginEdit(intRow, intCol); }}
+                      className={`shrink-0 truncate border-r border-line/60 px-2.5 leading-7 ${arrNumeric[intCol] ? 'text-right' : ''} ${
                         boolSelected ? 'bg-accent/15 outline outline-1 -outline-offset-1 outline-accent' : ''} ${
-                        boolChanged ? 'bg-env-amber/25 font-semibold' : ''} ${objEdit && !objEdit.arrEditable[intCol] ? 'text-muted opacity-45' : ''} ${boolCanEdit ? 'cursor-cell' : ''}`}>
+                        boolChanged ? 'bg-env-amber/25 font-semibold' : ''} ${objEdit && !objEdit.arrEditable[intCol] ? 'text-muted' : ''} ${boolCanEdit ? 'cursor-cell' : ''}`}>
                       {objValue === null || objValue === undefined ? <span className="text-muted italic">{boolNew && boolCanEdit ? 'default' : 'NULL'}</span> : display(objValue)}
                     </div>
                   );

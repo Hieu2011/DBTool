@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import {
-  buildDeletes, buildInserts, buildUpdates, cellKey, editTargets, keyGeneratorSql, looksLikeSelect, rowEditable, rowIdTargets, type EditTarget, type RowUpdate,
+  binaryHex, buildDeletes, buildInserts, buildUpdates, cellKey, editTargets, isBinaryType, keyGeneratorSql, looksLikeSelect, rowEditable, rowIdTargets, type EditTarget, type RowUpdate,
 } from '../sql/editData';
 import { buildMongoStatements, mongoTarget } from '../sql/mongoEdit';
 import { mapColumns, parseSelect, rowIdSql, ROWID_ALIAS, type FromItem, type ParsedSelect } from '../sql/oracleEdit';
@@ -148,6 +148,7 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
   // ROWIDs only count for the table they were read for.
   const arrRowIds = objTarget?.byRowId && objReloaded?.target === objTarget.key ? objReloaded.rowIds : undefined;
   const intBase = objShown.rows.length;
+  const boolSql = objConnection.kind !== 'MongoDb';
   const boolBusy = objApply.status === 'running' || boolLoading;
   const intPending = dicChanges.size + arrNew.length + hsDeleted.size;
 
@@ -273,14 +274,22 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
   const duplicateRows = async () => {
     if (!objTarget || arrPicked.length === 0) return;
     const dicFound = await loadAuto(objTarget);
+    let intCut = 0;
     const arrCopies = arrPicked.map(intRow => objShown.columns.map((_, intCol) => {
       if (!objTarget.columns.has(intCol)) return null;
       // A copy gets a key of its own.
       const strAuto = dicFound.get(objTarget.columns.get(intCol)!);
       if (strAuto) return `=${strAuto}`;
       const objValue = dicChanges.has(cellKey(intRow, intCol)) ? dicChanges.get(cellKey(intRow, intCol)) : objGrid.rows[intRow][intCol];
-      return objValue === null || objValue === undefined ? null : display(objValue);
+      if (objValue === null || objValue === undefined) return null;
+      // Binary longer than the preview cannot be copied from what the grid holds.
+      if (boolSql && isBinaryType(objShown.columns[intCol].dataType) && binaryHex(display(objValue)) === null) { intCut++; return null; }
+      if (objTarget.cellError?.(intCol, display(objValue))) { intCut++; return null; }
+      return display(objValue);
     }));
+    setObjNote(intCut > 0
+      ? { text: `${plural(intCut, 'value')} could not be copied: the grid only holds the first part of them. Those cells are empty in the copy.`, error: true }
+      : null);
     setObjReveal({ row: intBase + arrNew.length });
     setHsRows(new Set(arrCopies.map((_, intCopy) => intBase + arrNew.length + intCopy)));
     setArrNew(arrPrev => [...arrPrev, ...arrCopies]);
@@ -327,6 +336,11 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
       },
       onEdit: (intRow: number, intCol: number, strValue: string | null | undefined) => {
         if (strValue === undefined && intRow >= intBase) return;
+        if (boolSql && strValue && !strValue.startsWith('=') && isBinaryType(objShown.columns[intCol].dataType) && binaryHex(strValue) === null) {
+          return setObjNote({ text: `${objShown.columns[intCol].name} is binary: type the whole value as hex, like 0x1A2B (an even number of hex digits).`, error: true });
+        }
+        const strCellError = strValue ? objTarget.cellError?.(intCol, strValue) : null;
+        if (strCellError) return setObjNote({ text: strCellError, error: true });
         setObjApply({ status: 'idle' });
         if (intRow >= intBase) {
           return setArrNew(arrPrev => arrPrev.map((arrRow, intNew) => (intNew === intRow - intBase ? arrRow.map((strOld, intAt) => (intAt === intCol ? strValue! : strOld)) : arrRow)));

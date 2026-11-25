@@ -16,10 +16,46 @@ const TYPE_OF: Record<string, FieldType> = {
   null: 'auto', undefined: 'auto', '': 'auto',
 };
 
+// The only calls a sub-document typed in a cell may hold: anything else would be run as script by the server.
+const CONSTRUCTORS = new Set(['ObjectId', 'ISODate', 'Date', 'NumberLong', 'NumberInt', 'NumberDecimal', 'Timestamp', 'BinData', 'UUID', 'MinKey', 'MaxKey']);
+const WORDS = new Set(['true', 'false', 'null', 'undefined', 'NaN', 'Infinity', 'new']);
+const CLOSER: Record<string, string> = { '{': '}', '[': ']', '(': ')' };
+
+/**
+ * The text of an object / array cell as one shell value: a single { } or [ ] holding only data (strings, numbers,
+ * keys and the constructors above). Null for anything else: cut text (…), unbalanced brackets, operators, calls.
+ */
+export function documentLiteral(strValue: string, strType: string): string | null {
+  const strText = strValue.trim();
+  if (!(strType === 'array' ? /^\[[\s\S]*\]$/ : /^\{[\s\S]*\}$/).test(strText)) return null;
+  // Strings hold anything: judge the rest.
+  const strBare = strText.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""');
+  if (/'|"(?!")/.test(strBare.replace(/""/g, '')) || /[^\w\s{}[\](),:.+\-"$]/.test(strBare)) return null;
+  if (/(?<!\d)\.|\.(?!\d)/.test(strBare)) return null; // a dot only inside a number: no member access
+  const arrOpen: string[] = [];
+  for (let intAt = 0; intAt < strBare.length; intAt++) {
+    const strChar = strBare[intAt];
+    if (CLOSER[strChar]) arrOpen.push(CLOSER[strChar]);
+    else if (strChar === '}' || strChar === ']' || strChar === ')') {
+      if (arrOpen.pop() !== strChar) return null;
+      if (arrOpen.length === 0 && intAt < strBare.length - 1) return null; // one value, nothing after it
+    }
+  }
+  if (arrOpen.length > 0) return null;
+  for (const arrWord of strBare.matchAll(/(?<![\w$])[A-Za-z_$][\w$]*/g)) {
+    const strNext = strBare.slice(arrWord.index + arrWord[0].length).trimStart()[0];
+    if (strNext === ':') continue; // a key
+    if (strNext === '(' ? !CONSTRUCTORS.has(arrWord[0]) : !WORDS.has(arrWord[0])) return null;
+  }
+  return strText;
+}
+
 /** A cell's text as a shell literal of the column's type; text that does not fit the type is kept as it reads. */
 function fieldLiteral(strValue: string | null, strType: string) {
   if (strValue === null || strValue === '') return 'null';
   const strText = strValue.trim();
+  // Not a whole document (the grid refuses those edits): stored as the text it is, never run.
+  if (strType === 'object' || strType === 'array') return documentLiteral(strValue, strType) ?? JSON.stringify(strValue);
   if (strType === 'decimal128' && /^-?\d+(\.\d+)?$/.test(strText)) return `NumberDecimal("${strText}")`;
   if (strType === 'int64' && /^-?\d{1,18}$/.test(strText)) return `NumberLong("${strText}")`;
   return shellValue(strValue, TYPE_OF[strType] ?? 'auto') ?? shellValue(strValue, 'auto')!;
@@ -50,13 +86,21 @@ export function mongoTarget(strSql: string, objResult: QueryResult): EditTarget 
 
   const dicColumns = new Map<number, string>();
   objResult.columns.forEach((objColumn, intCol) => {
-    // Sub-documents, arrays and binary show as text that cannot be turned back; a dotted name would be read as a path.
-    if (intCol !== intId && objColumn.dataType in TYPE_OF && !/^\$|\./.test(objColumn.name)) dicColumns.set(intCol, objColumn.name);
+    // Binary and mixed-type columns show as text that cannot be turned back; a dotted name would be read as a path.
+    if (intCol !== intId && (objColumn.dataType in TYPE_OF || objColumn.dataType === 'object' || objColumn.dataType === 'array')
+      && !/^\$|\./.test(objColumn.name)) dicColumns.set(intCol, objColumn.name);
   });
   const strCollection = arrFind[1].trim(); // as written: a quoted name may hold spaces
   return {
     key: 'mongo', label: strCollection, tableSql: strCollection, keyColumns: ['_id'], keyIndexes: [[intId]], columns: dicColumns,
     rowOk: arrRow => idLiteral(arrRow[intId], strIdType) !== null,
+    cellError: (intCol, strValue) => {
+      const strType = objResult.columns[intCol].dataType;
+      if ((strType !== 'object' && strType !== 'array') || documentLiteral(strValue, strType) !== null) return null;
+      return strValue.trimEnd().endsWith('…')
+        ? `${objResult.columns[intCol].name}: the value is longer than the grid holds, so it cannot be saved from here.`
+        : `${objResult.columns[intCol].name} holds ${strType === 'array' ? 'an array: type it as [ … ]' : 'a document: type it as { … }'} with data only (strings, numbers, ObjectId(…), ISODate(…)…).`;
+    },
     reason: dicColumns.size === 0 ? 'no field with a simple value' : undefined,
   };
 }

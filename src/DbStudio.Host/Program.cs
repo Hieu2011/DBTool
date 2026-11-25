@@ -26,7 +26,7 @@ internal static class Program
         {
             var strUrl = boolDev ? "http://localhost:5173" : ApiHost.GetListeningAddress(objApp);
             Application.Run(new MainForm(strUrl, strToken, boolDev, objApp.Services.GetRequiredService<ExportTargets>(),
-                objApp.Services.GetRequiredService<SqlFiles>(), objApp.Services.GetRequiredService<SettingsStore>()));
+                objApp.Services.GetRequiredService<SqlFiles>(), objApp.Services.GetRequiredService<SettingsStore>(), objApp.Services.GetRequiredService<UpdateService>()));
         }
         finally
         {

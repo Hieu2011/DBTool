@@ -1,6 +1,6 @@
 import type {
   Connection, ConnectionInput, DbObjectInfo, ExportResult, HistoryEntry, ObjectDetail, QueryError, QueryResult, RoutineArgument, RoutineInfo,
-  RedisDatabaseInfo, RedisKeyPage, ResultOrigin, RoutineResult, SchemaMetadata, Snippet,
+  RedisDatabaseInfo, RedisKeyPage, ResultOrigin, RoutineResult, SchemaMetadata, Snippet, UpdateConfig, UpdateInfo,
 } from './types';
 
 declare global {
@@ -169,6 +169,15 @@ export const api = {
   cancel: (strQueryId: string) => request<void>(`/query/${strQueryId}/cancel`, { method: 'POST' }),
 
   /** UI settings kept by the app (sidebar width...): the browser's own storage is lost on every start. */
+  updateConfig: () => request<UpdateConfig>('/update/config'),
+  /** password: undefined keeps the saved one, '' means the link has none. */
+  saveUpdateConfig: (strUrl: string, strPassword?: string) =>
+    request<UpdateConfig>('/update/config', { method: 'PUT', body: JSON.stringify({ url: strUrl, password: strPassword ?? null }) }),
+  checkUpdate: () => request<UpdateInfo>('/update/check', { method: 'POST' }),
+  /** Resolves when the new exe has been started; the app closes a moment later. */
+  applyUpdate: () => request<void>('/update/apply', { method: 'POST' }),
+  updateProgress: () => request<{ received: number; total?: number | null } | undefined>('/update/progress'),
+
   settings: () => request<Record<string, unknown>>('/settings'),
   /** Merges: keys not sent are kept, null removes a key. */
   saveSettings: (dicValues: Record<string, unknown>) => request<void>('/settings', { method: 'PUT', body: JSON.stringify(dicValues) }),

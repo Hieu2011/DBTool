@@ -12,6 +12,8 @@
     <!-- WebView2 ships a WPF assembly too; its WindowsBase version note is harmless here -->
     <MSBuildWarningsAsMessages>MSB3277</MSBuildWarningsAsMessages>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Help > Check for updates compares this with version.json of the update folder: raise it for every release -->
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

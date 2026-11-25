@@ -19,6 +19,8 @@ export interface EditTarget {
   columns: Map<number, string>;
   /** Why this table cannot be edited here; undefined when it can. */
   reason?: string;
+  /** Why this text cannot be saved in that column (MongoDB: a sub-document that does not read as one); null when it can. */
+  cellError?: (intCol: number, strValue: string) => string | null;
   /** One more test a row has to pass (MongoDB: its _id can be written back). */
   rowOk?: (arrRow: unknown[]) => boolean;
 }
@@ -32,8 +34,17 @@ export interface RowUpdate {
   check?: 'matched';
 }
 
-// Shown as a hex preview, not as the value itself.
-const NOT_EDITABLE_TYPE = /bytea|blob|raw|binary|bfile|varbinary|image/i;
+// Never written from the grid.
+const NOT_EDITABLE_TYPE = /bfile|image/i;
+
+/** bytea / RAW / BLOB...: the cell holds hex (0x…), whole only up to the 64 bytes the server sends. */
+export const isBinaryType = (strType: string) => /bytea|blob|raw|binary/i.test(strType) && !/binary_(float|double)/i.test(strType);
+
+/** The hex digits of a binary cell's text (0xAB12, PostgreSQL's \\xab12, or bare), null when it is not a whole value. */
+export function binaryHex(strValue: string) {
+  const strHex = strValue.trim().replace(/^(0x|\\x)/i, '');
+  return /^([0-9a-f]{2})*$/i.test(strHex) ? strHex.toUpperCase() : null;
+}
 
 // The only expressions a cell may hold (typed after "="); anything else is a value and gets quoted.
 const EXPRESSION = /^=\s*((?:[\w$#"]+\.)*[\w$#"]+\.NEXTVAL|NEXTVAL\('[^']+'\)|SYSDATE|SYSTIMESTAMP|CURRENT_TIMESTAMP|(?:[\w$#]+\.)*[\w$#]+\(\))\s*$/i;
@@ -41,7 +52,11 @@ const EXPRESSION = /^=\s*((?:[\w$#"]+\.)*[\w$#"]+\.NEXTVAL|NEXTVAL\('[^']+'\)|SY
 /** A cell's text as SQL: `=SEQ.NEXTVAL` / `=SYSDATE` as they are, the rest as a literal of the column's type. */
 function cellSql(strValue: string | null, strType: string, strKind: DbKind) {
   const arrExpression = EXPRESSION.exec(strValue ?? '');
-  return arrExpression ? arrExpression[1] : sqlLiteral(strValue, strType, strKind);
+  if (arrExpression) return arrExpression[1];
+  if (strValue === null || strValue === '' || !isBinaryType(strType)) return sqlLiteral(strValue, strType, strKind);
+  // Text that is not hex still goes through the hex function, so the database rejects it instead of storing the text's bytes.
+  const strHex = binaryHex(strValue) ?? strValue.replace(/'/g, "''");
+  return strKind === 'Oracle' ? `HEXTORAW('${strHex}')` : `decode('${strHex}', 'hex')`;
 }
 
 /**

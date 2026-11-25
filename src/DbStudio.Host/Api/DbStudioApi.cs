@@ -44,6 +44,35 @@ internal static class DbStudioApi
             return Results.NoContent();
         });
 
+        // ---------- self-update ----------
+        objApi.MapGet("/update/config", (UpdateService objUpdates) => objUpdates.GetConfig());
+
+        objApi.MapPut("/update/config", (UpdateConfigInput objInput, UpdateService objUpdates) =>
+        {
+            try { return Results.Ok(objUpdates.SaveConfig(objInput)); }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+        });
+
+        objApi.MapPost("/update/check", async (UpdateService objUpdates, CancellationToken objCancelToken) =>
+        {
+            try { return Results.Ok(await objUpdates.CheckAsync(objCancelToken)); }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+        });
+
+        // Downloads, verifies, swaps the exe and restarts. Not tied to the request: closing the dialog must not leave half an update.
+        objApi.MapPost("/update/apply", async (UpdateService objUpdates) =>
+        {
+            try
+            {
+                await objUpdates.ApplyAsync(CancellationToken.None);
+                return Results.NoContent();
+            }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+        });
+
+        objApi.MapGet("/update/progress", (UpdateService objUpdates) =>
+            objUpdates.Progress is { } objProgress ? Results.Ok(objProgress) : Results.NoContent());
+
         // ---------- settings (sidebar width...) ----------
         objApi.MapGet("/settings", (SettingsStore objSettings) => objSettings.GetUi());
 

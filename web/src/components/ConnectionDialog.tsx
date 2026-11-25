@@ -3,6 +3,7 @@ import { api, ApiError } from '../api';
 import type { Connection, ConnectionInput, DbKind } from '../types';
 import { DEFAULT_PORT, KIND_LABEL } from '../types';
 import { ENV_COLORS, envVar } from '../envColor';
+import { IconCheck, IconClose, KindIcon } from './icons';
 
 export type DialogState = null | { mode: 'new' } | { mode: 'edit'; connection: Connection };
 
@@ -36,6 +37,15 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
   });
   const [strBusy, setStrBusy] = useState<'test' | 'save' | null>(null);
   const [objMessage, setObjMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [intSeconds, setIntSeconds] = useState(0);
+
+  // Seconds on screen while a test runs (the server gives up after 20 s).
+  useEffect(() => {
+    if (strBusy !== 'test') return;
+    setIntSeconds(0);
+    const intTimer = setInterval(() => setIntSeconds(intPrev => intPrev + 1), 1000);
+    return () => clearInterval(intTimer);
+  }, [strBusy]);
 
   useEffect(() => {
     const onKey = (objEvent: KeyboardEvent) => objEvent.key === 'Escape' && onClose();
@@ -43,23 +53,33 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const set = <K extends keyof ConnectionInput>(strKey: K, objValue: ConnectionInput[K]) =>
+  const set = <K extends keyof ConnectionInput>(strKey: K, objValue: ConnectionInput[K]) => {
+    setObjMessage(null); // the last test result no longer describes the form
     setObjForm(objPrev => ({ ...objPrev, [strKey]: objValue }));
+  };
 
-  const changeKind = (strKind: DbKind) =>
+  const strTarget = `${objForm.host}:${objForm.port}`;
+
+  const changeKind = (strKind: DbKind) => {
+    setObjMessage(null);
     setObjForm(objPrev => ({
       ...objPrev,
       kind: strKind,
       // only move the port if the user hadn't changed it
       port: objPrev.port === DEFAULT_PORT[objPrev.kind] ? DEFAULT_PORT[strKind] : objPrev.port,
     }));
+  };
 
   const test = async () => {
     setStrBusy('test');
     setObjMessage(null);
+    const dtStart = performance.now();
     try {
       await api.testConnection(objForm);
-      setObjMessage({ ok: true, text: 'Connected.' });
+      setObjMessage({
+        ok: true,
+        text: `Connected successfully to ${KIND_LABEL[objForm.kind]} at ${strTarget} (${Math.round(performance.now() - dtStart)} ms).`,
+      });
     } catch (objEx) {
       setObjMessage({ ok: false, text: objEx instanceof ApiError ? objEx.detail.message : (objEx as Error).message });
     } finally {
@@ -88,24 +108,35 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
         className="w-[30rem] rounded-md border border-line bg-raised shadow-2xl"
         style={{ borderTop: `3px solid ${envVar(objForm.color)}` }}
       >
-        <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">
-          {boolEditing ? `Edit ${objForm.name}` : 'New connection'}
-        </h2>
+        <div className="flex items-center gap-2.5 border-b border-line py-2 pl-4 pr-2">
+          <KindIcon strKind={objForm.kind} intSize={20} />
+          <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">
+            {boolEditing ? `Edit ${objForm.name}` : 'New connection'}
+          </h2>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            <IconClose />
+          </button>
+        </div>
 
         <div className="grid grid-cols-[7.5rem_1fr] items-center gap-x-3 gap-y-2.5 p-4">
           <label htmlFor="c-name" className="text-muted">Name</label>
           <input id="c-name" className="field" autoFocus value={objForm.name}
             placeholder="TMS dev" onChange={objEvent => set('name', objEvent.target.value)} />
 
-          <label htmlFor="c-kind" className="text-muted">Type</label>
-          <select id="c-kind" className="field" value={objForm.kind}
-            onChange={objEvent => changeKind(objEvent.target.value as DbKind)}>
+          <span className="text-muted">Type</span>
+          <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Type">
             {(Object.keys(KIND_LABEL) as DbKind[]).map(strKind => (
-              <option key={strKind} value={strKind} disabled={!SUPPORTED.includes(strKind)}>
-                {KIND_LABEL[strKind]}{SUPPORTED.includes(strKind) ? '' : ' (coming later)'}
-              </option>
+              <button key={strKind} type="button" role="radio" aria-checked={objForm.kind === strKind}
+                disabled={!SUPPORTED.includes(strKind)} title={SUPPORTED.includes(strKind) ? undefined : 'Coming later'}
+                onClick={() => changeKind(strKind)}
+                className={`flex flex-col items-center gap-1 rounded-md border px-1 py-2 text-xs disabled:opacity-40 ${
+                  objForm.kind === strKind ? 'border-accent bg-accent/10 font-semibold' : 'border-line text-muted hover:bg-hover'
+                }`}>
+                <KindIcon strKind={strKind} intSize={24} />
+                {KIND_LABEL[strKind]}
+              </button>
             ))}
-          </select>
+          </div>
 
           <label htmlFor="c-host" className="text-muted">Host and port</label>
           <div className="flex gap-2">
@@ -149,10 +180,20 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
           </div>
         </div>
 
-        {objMessage && (
-          <p className={`mx-4 mb-3 whitespace-pre-wrap rounded border px-3 py-2 text-xs ${
-            objMessage.ok ? 'border-line text-fg' : 'border-danger/40 text-danger'}`}>
-            {objMessage.text}
+        {strBusy === 'test' && (
+          <div className="mx-4 mb-3 rounded border border-line px-3 py-2 text-xs" role="status">
+            <div className="mb-1.5 flex justify-between">
+              <span>Connecting to {strTarget}…</span>
+              <span className="tabular-nums text-muted">{intSeconds}s</span>
+            </div>
+            <div className="progress-bar" />
+          </div>
+        )}
+        {objMessage && strBusy !== 'test' && (
+          <p role="status" className={`mx-4 mb-3 flex items-start gap-2 whitespace-pre-wrap rounded border px-3 py-2 text-xs ${
+            objMessage.ok ? 'border-success/40 bg-success/10 text-success' : 'border-danger/40 bg-danger/10 text-danger'}`}>
+            {objMessage.ok && <IconCheck intSize={14} className="mt-px" />}
+            <span className="min-w-0 break-words">{objMessage.text}</span>
           </p>
         )}
 

@@ -143,11 +143,18 @@ public sealed partial class MongoProvider : IDbProvider
 
         // Fields are a guess from a sample; a collection that cannot be sampled simply shows none.
         var arrColumns = new List<ColumnMeta>[lstCollections.Count];
+        var arrRows = new long?[lstCollections.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, lstCollections.Count),
             new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = objCancelToken },
             async (intIndex, objToken) =>
             {
                 arrColumns[intIndex] = [];
+                if (!lstCollections[intIndex].View)
+                {
+                    // from collection metadata, no scan
+                    try { arrRows[intIndex] = await objDatabase.GetCollection<BsonDocument>(lstCollections[intIndex].Name).EstimatedDocumentCountAsync(cancellationToken: objToken); }
+                    catch (Exception objEx) when (objEx is MongoException or TimeoutException) { }
+                }
                 if (intIndex >= MaxSampledCollections) return;
                 try
                 {
@@ -158,7 +165,7 @@ public sealed partial class MongoProvider : IDbProvider
             });
 
         var lstTables = lstCollections
-            .Select((objItem, intIndex) => new TableMeta(strDatabase, objItem.Name, objItem.View ? "VIEW" : "COLLECTION", arrColumns[intIndex]))
+            .Select((objItem, intIndex) => new TableMeta(strDatabase, objItem.Name, objItem.View ? "VIEW" : "COLLECTION", arrColumns[intIndex]) { Rows = arrRows[intIndex] })
             .ToList();
         return new SchemaMetadata(lstTables, DateTimeOffset.Now, [], null, lstDatabases, [strDatabase]);
     }

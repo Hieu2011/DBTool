@@ -60,7 +60,8 @@ export interface ResultOrigin { columns: ColumnOrigin[]; tables: EditableTable[]
 export interface QueryError { message: string; position?: number | null; code?: string | null }
 
 export interface ColumnMeta { name: string; dataType: string }
-export interface TableMeta { schema: string; name: string; type: string; columns: ColumnMeta[] }
+/** rows: estimate from the catalog statistics, absent when the database has none. */
+export interface TableMeta { schema: string; name: string; type: string; columns: ColumnMeta[]; rows?: number | null }
 /** Function, procedure, sequence, package... signature tells PostgreSQL overloads apart. */
 export interface DbObjectInfo { schema: string; name: string; type: string; signature?: string | null }
 export interface SchemaMetadata {
@@ -84,6 +85,9 @@ export interface RoutineResult { results: ObjectSection[]; outputs: RoutineOutpu
 
 export interface ObjectSection { title: string; result: QueryResult }
 export interface ObjectDetail { sections: ObjectSection[]; ddl?: string | null; ddlError?: string | null; comment?: string | null }
+
+export interface UpdateConfig { url?: string | null; hasPassword: boolean; currentVersion: string; canApply: boolean }
+export interface UpdateInfo { currentVersion: string; latestVersion: string; available: boolean; notes?: string | null }
 
 export const KIND_LABEL: Record<DbKind, string> = {
   PostgreSql: 'PostgreSQL',

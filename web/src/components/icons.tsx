@@ -74,3 +74,49 @@ export const IconLink = icon(
   <path d="M10 14a4 4 0 0 0 5.7 0l3-3A4 4 0 0 0 13 5.3l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1" />);
 export const IconColumn =icon(<circle cx="12" cy="12" r="2.6" />, true);
 export const IconSqlFile = icon(<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 7 20zM14 3.5v4h4M9.5 13h5M9.5 16.5h5" />);
+
+// ---- database kinds (brand-colored badges, white glyph) ----
+const KIND_BADGE: Record<string, { color: string; glyph: ReactNode }> = {
+  PostgreSql: {
+    color: '#336791',
+    glyph: (
+      <>
+        <circle cx="6.6" cy="9.6" r="3.4" fill="#fff" fillOpacity=".55" stroke="none" />
+        <circle cx="17.4" cy="9.6" r="3.4" fill="#fff" fillOpacity=".55" stroke="none" />
+        <ellipse cx="12" cy="10.6" rx="4.4" ry="5" fill="#fff" stroke="none" />
+        <path d="M12 14.5v3.2a1.9 1.9 0 0 0 3.6.8" />
+      </>
+    ),
+  },
+  Oracle: { color: '#C74634', glyph: <rect x="4.6" y="8" width="14.8" height="8" rx="4" /> },
+  MongoDb: {
+    color: '#3F9142',
+    glyph: (
+      <>
+        <path d="M12 4.2c2.9 3 4.2 5.4 4.2 8 0 2.7-1.7 4.6-4.2 5.4-2.5-.8-4.2-2.7-4.2-5.4 0-2.6 1.3-5 4.2-8z" fill="#fff" stroke="none" />
+        <path d="M12 16.5v3.6" />
+      </>
+    ),
+  },
+  Redis: {
+    color: '#D0342C',
+    glyph: (
+      <>
+        <path d="m12 5.2 6.6 3L12 11.2l-6.6-3z" fill="#fff" stroke="none" />
+        <path d="m5.4 12 6.6 3 6.6-3M5.4 15.6l6.6 3 6.6-3" />
+      </>
+    ),
+  },
+};
+
+/** Badge of a database kind; boolMuted draws it gray (connection not in use). */
+export function KindIcon({ strKind, intSize = 16, boolMuted = false }: { strKind: string; intSize?: number; boolMuted?: boolean }) {
+  const objBadge = KIND_BADGE[strKind];
+  return (
+    <svg width={intSize} height={intSize} viewBox="0 0 24 24" aria-hidden="true" className={`shrink-0 ${boolMuted ? 'opacity-60 grayscale' : ''}`}
+      fill="none" stroke="#fff" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="1" y="1" width="22" height="22" rx="5.5" fill={objBadge?.color ?? '#6B7685'} stroke="none" />
+      {objBadge?.glyph}
+    </svg>
+  );
+}

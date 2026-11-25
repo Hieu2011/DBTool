@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api, ApiError } from '../api';
+import { showToast } from '../toast';
+import { TREE_STICKY_TOP, useOuterScroll } from './useOuterScroll';
 import { qualifiedName, quoteIdent } from '../sql/identifiers';
 import {
   countScript, deleteScript, dropScript, executeScript, insertScript, nextValueScript, selectScript, updateScript,
@@ -25,9 +27,19 @@ interface Props {
   onExecuteRoutine: (objRoutine: DbObjectInfo) => void;
   /** The object of the active tab: the tree opens down to it, shows it and marks it. */
   objReveal?: DbObjectInfo | null;
+  /** The sidebar's one filter box, shared by every tree. */
+  strFilter: string;
+  onFilter: (strFilter: string) => void;
+  /** Goes up when the connection's Refresh button is pressed. */
+  intRefresh: number;
 }
 
-interface TreeItem { object: DbObjectInfo; columns?: ColumnMeta[] }
+/** 1234 → 1,234; 15300 → 15.3K; 2400000 → 2.4M. */
+const compactCount = (intRows: number) =>
+  intRows < 10000 ? intRows.toLocaleString()
+    : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(intRows);
+
+interface TreeItem { object: DbObjectInfo; columns?: ColumnMeta[]; rows?: number | null }
 interface TreeSchema { schema: string; loaded: boolean; groups: [string, TreeItem[]][] }
 
 type DetailState =
@@ -164,7 +176,7 @@ function groupObjects(objMetadata: SchemaMetadata, arrFixedGroups: [string, stri
   };
   for (const strSchema of objMetadata.schemas ?? []) groupsOf(strSchema);
   for (const objTable of objMetadata.tables)
-    add({ object: { schema: objTable.schema, name: objTable.name, type: objTable.type }, columns: objTable.columns });
+    add({ object: { schema: objTable.schema, name: objTable.name, type: objTable.type }, columns: objTable.columns, rows: objTable.rows });
   for (const objObject of objMetadata.objects ?? []) add({ object: objObject });
 
   // Without a schema list everything was loaded in one go.
@@ -182,18 +194,21 @@ function groupObjects(objMetadata: SchemaMetadata, arrFixedGroups: [string, stri
 }
 
 export function ObjectTree({
-  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine, objReveal,
+  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine, objReveal, strFilter, onFilter, intRefresh,
 }: Props) {
   // Row of the active tab's object; strScrollTo: still to be scrolled into view (its rows may not exist yet).
   const [strCurrentKey, setStrCurrentKey] = useState<string | null>(null);
   const [strScrollTo, setStrScrollTo] = useState<string | null>(null);
   const refRevealed = useRef<string | null>(null);
-  const refScroller = useRef<HTMLDivElement>(null);
+  // The sidebar scrolls all trees as one list: rows are virtualized against its scroller.
+  const refList = useRef<HTMLDivElement>(null);
+  const objOuter = useOuterScroll(refList);
+  const intMargin = objOuter?.margin ?? 0;
   const [objMenu, setObjMenu] = useState<{ x: number; y: number; row: TreeRow } | null>(null);
   const [boolScripting, setBoolScripting] = useState(false);
   const refAutoExpanded = useRef(false);
   const [hsExpanded, setHsExpanded] = useState<Set<string>>(new Set());
-  const [strFilter, setStrFilter] = useState('');
+  const setStrFilter = (fnNext: (strPrev: string) => string) => { const strNext = fnNext(strFilter); if (strNext !== strFilter) onFilter(strNext); };
   // The filter opens every schema / group that holds a match; these are the ones the user closed again.
   const [hsFilterClosed, setHsFilterClosed] = useState<Set<string>>(new Set());
   useEffect(() => { setHsFilterClosed(new Set()); }, [strFilter]);
@@ -207,13 +222,21 @@ export function ObjectTree({
   const dicGroupLabel = useMemo(() => new Map(arrFixedGroups), [arrFixedGroups]);
   const dicObjectFolders = OBJECT_FOLDERS[objConnection.kind] ?? {};
 
+  const refConnected = useRef(false);
   const load = (boolRefresh: boolean) => {
     setStrState('loading');
     setDicSchemaState({});
     setDicDetails({});
     loadMetadata(objConnection.id, boolRefresh).then(
-      () => setStrState('idle'),
-      objEx => setStrState(errorMessage(objEx)),
+      () => {
+        setStrState('idle');
+        if (!refConnected.current) showToast('success', `Connected to ${objConnection.name}`);
+        refConnected.current = true;
+      },
+      objEx => {
+        setStrState(errorMessage(objEx));
+        showToast('error', `${objConnection.name}: ${boolRefresh ? 'refresh' : 'connection'} failed`, errorMessage(objEx));
+      },
     );
   };
 
@@ -238,6 +261,11 @@ export function ObjectTree({
   useEffect(() => {
     if (!objMetadata && strState === 'idle') load(false);
   }, [objMetadata, strState, objConnection.id]);
+
+  // Objects that arrive (this tree's load or an editor's) make an older error stale.
+  useEffect(() => {
+    if (objMetadata) setStrState(strPrev => (strPrev === 'loading' ? strPrev : 'idle'));
+  }, [objMetadata]);
 
   const arrSchemas = useMemo(
     () => (objMetadata ? groupObjects(objMetadata, arrFixedGroups) : []),
@@ -409,10 +437,19 @@ export function ObjectTree({
 
   const objVirtual = useVirtualizer({
     count: arrRows.length,
-    getScrollElement: () => refScroller.current,
+    getScrollElement: () => objOuter?.element ?? null,
     estimateSize: () => ROW_H,
     overscan: 15,
+    scrollMargin: intMargin,
+    scrollPaddingStart: TREE_STICKY_TOP,
   });
+
+  const refRefresh = useRef(intRefresh);
+  useEffect(() => {
+    if (refRefresh.current === intRefresh) return;
+    refRefresh.current = intRefresh;
+    load(true);
+  }, [intRefresh]);
 
   useEffect(() => {
     if (!strScrollTo) return;
@@ -495,6 +532,12 @@ export function ObjectTree({
             <IconInfo intSize={13} />
           </button>
         </span>
+        {objRow.item.rows != null && (
+          <span className="ml-auto shrink-0 pl-2 text-[11px] tabular-nums text-muted group-hover:ml-0"
+            title={`About ${objRow.item.rows.toLocaleString()} rows (estimate from the database statistics)`}>
+            {compactCount(objRow.item.rows)}
+          </span>
+        )}
       </>
     );
   };
@@ -602,7 +645,7 @@ export function ObjectTree({
 
   // Pinned rows cover the top of the list, so the row they describe is the first one still visible
   // below them: settle on a chain whose length agrees with the row it was computed for.
-  const intFirstVisible = Math.floor((objVirtual.scrollOffset ?? 0) / ROW_H);
+  const intFirstVisible = Math.floor(Math.max(0, (objVirtual.scrollOffset ?? 0) + TREE_STICKY_TOP - intMargin) / ROW_H);
   let arrPinned: number[] = [];
   for (let intPass = 0; intPass < 5 && arrRows.length > 0; intPass++) {
     const intTarget = Math.min(intFirstVisible + arrPinned.length, arrRows.length - 1);
@@ -613,25 +656,11 @@ export function ObjectTree({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col border-t border-line">
-      <div className="flex h-9 shrink-0 items-center justify-between pl-3 pr-1.5">
-        <h2 className="truncate text-[11px] font-semibold uppercase tracking-wider text-muted" title={objConnection.name}>
-          Objects
-          {objMetadata?.schemas && <span className="ml-1.5 font-normal normal-case tracking-normal">{objMetadata.schemas.length} schemas</span>}
-          {strState === 'loading' && <span className="ml-1.5 font-normal normal-case tracking-normal">loading…</span>}
-          {boolScripting && <span className="ml-1.5 font-normal normal-case tracking-normal">building DDL…</span>}
-        </h2>
-        <button className="icon-btn icon-btn-sm" onClick={() => load(true)} disabled={strState === 'loading'}
-          aria-label="Refresh objects" title="Reload the object list">
-          <IconRefresh intSize={14} />
-        </button>
-      </div>
-      <div className="shrink-0 px-2 pb-1.5">
-        <input className="field h-7" placeholder={objMetadata?.schemas ? 'Filter by schema or object name' : 'Filter by name'}
-          value={strFilter} onChange={objEvent => setStrFilter(objEvent.target.value)} />
-      </div>
-
-      {strState !== 'idle' && strState !== 'loading' && (
+    <div className="pb-1 text-xs">
+      {(strState === 'loading' || boolScripting) && (
+        <p className="px-3 py-1 text-muted">{boolScripting ? 'Building DDL…' : objMetadata ? 'Reloading objects…' : 'Connecting…'}</p>
+      )}
+      {strState !== 'idle' && strState !== 'loading' && !objMetadata && (
         <p className="mx-2 mb-1.5 rounded border border-danger/40 p-2 text-xs text-danger">{strState}</p>
       )}
       {objMetadata?.objectsError && (
@@ -640,10 +669,10 @@ export function ObjectTree({
         </p>
       )}
 
-      <div ref={refScroller} className="min-h-0 flex-1 overflow-auto text-xs">
+      <div ref={refList}>
         {/* The schema / folder / table the top row belongs to stays pinned, so a folder with hundreds
             of entries can be collapsed (click) without scrolling back up to it. */}
-        <div className="sticky top-0 z-10 h-0">
+        <div className="sticky z-10 h-0" style={{ top: TREE_STICKY_TOP }}>
           {arrPinned.length > 0 && (
             <div className="border-b border-line bg-bg shadow-md">
               {arrPinned.map(intIndex => {
@@ -680,7 +709,7 @@ export function ObjectTree({
                 key={objRow.key}
                 className={`group absolute left-0 flex w-full items-center gap-1.5 pr-1.5 hover:bg-hover ${
                   objRow.key === strCurrentKey ? 'bg-accent/15 shadow-[inset_2px_0_0_var(--accent)]' : ''}`}
-                style={{ height: ROW_H, transform: `translateY(${objItem.start}px)`, paddingLeft: 8 + objRow.depth * 12 }}
+                style={{ height: ROW_H, transform: `translateY(${objItem.start - intMargin}px)`, paddingLeft: 8 + objRow.depth * 12 }}
                 onClick={canToggle(objRow) ? () => toggle(objRow) : undefined}
                 onDoubleClick={objTarget ? () => onOpenObject(objTarget) : undefined}
                 onContextMenu={objEvent => {

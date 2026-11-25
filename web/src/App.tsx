@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import type { Connection, DbObjectInfo, SchemaMetadata } from './types';
 import { ConnectionList } from './components/ConnectionList';
+import { Toaster } from './components/Toaster';
 import { ConnectionDialog, type DialogState } from './components/ConnectionDialog';
 import { FORMAT_ACTION, QueryWorkspace, type EditorHandle } from './components/QueryWorkspace';
 import { MenuBar, type MenuDef } from './components/MenuBar';
@@ -14,6 +15,8 @@ import { envVar } from './envColor';
 import { RoutineRunner } from './components/RoutineRunner';
 import { HistoryDialog } from './components/HistoryDialog';
 import { SnippetsDialog } from './components/SnippetsDialog';
+import { UpdateDialog } from './components/UpdateDialog';
+import { showToast } from './toast';
 import { getSnippets, setSnippets } from './sql/snippets';
 import { IconClose, IconHistory, IconPlay, IconPlus, IconSidebar, IconSqlFile, IconTable } from './components/icons';
 
@@ -59,6 +62,14 @@ export default function App() {
   const [boolSidebarOpen, setBoolSidebarOpen] = useState(true);
   const [boolHistory, setBoolHistory] = useState(false);
   const [boolSnippets, setBoolSnippets] = useState(false);
+  const [boolUpdate, setBoolUpdate] = useState(false);
+
+  // One quiet check at start, only when an update link is set; the update itself is always the user's click.
+  useEffect(() => {
+    api.updateConfig().then(objConfig => (objConfig.url ? api.checkUpdate() : null)).then(objInfo => {
+      if (objInfo?.available) showToast('info', `DbStudio ${objInfo.latestVersion} is available`, 'Help > Check for updates… installs it.');
+    }).catch(() => {});
+  }, []);
 
   // Snippets feed every editor's autocomplete.
   useEffect(() => { api.snippets().then(setSnippets).catch(() => {}); }, []);
@@ -133,6 +144,10 @@ export default function App() {
   useEffect(() => { reload(); }, [reload]);
 
   const objActiveTab = arrTabs.find(objTab => objTab.id === strActiveTabId);
+  // Outlives the tabs, so File > New SQL tab still has a connection after the last one closes.
+  const [strSelectedId, setStrSelectedId] = useState<string | null>(null);
+  const strActiveConnectionId = objActiveTab?.connectionId;
+  useEffect(() => { if (strActiveConnectionId) setStrSelectedId(strActiveConnectionId); }, [strActiveConnectionId]);
   const objActiveConnection = arrConnections.find(objItem => objItem.id === objActiveTab?.connectionId);
 
   const addTab = (objTab: AppTab) => {
@@ -196,7 +211,10 @@ export default function App() {
 
   // ---- File menu ----
   // A SQL tab always runs on one connection: the active tab's, or the only one there is.
-  const strFileConnectionId = objActiveTab?.connectionId ?? (arrConnections.length === 1 ? arrConnections[0].id : undefined);
+  // No tab open: the connection last used or opened in the sidebar.
+  const strFileConnectionId = objActiveTab?.connectionId
+    ?? arrConnections.find(objItem => objItem.id === strSelectedId)?.id
+    ?? (arrConnections.length === 1 ? arrConnections[0].id : undefined);
 
   const openSqlFiles = async () => {
     if (!strFileConnectionId) { alert('Open a connection first: a SQL file runs on the connection of its tab.'); return; }
@@ -370,11 +388,27 @@ export default function App() {
           onSelect: () => { if (objActiveConnection) remove(objActiveConnection); } },
       ],
     },
+    {
+      label: 'Help',
+      items: [
+        { label: 'Check for updates…', onSelect: () => setBoolUpdate(true) },
+      ],
+    },
   ];
 
   return (
     <div className="flex h-full flex-col">
       <MenuBar arrMenus={arrMenus} />
+      {boolUpdate && (
+        <UpdateDialog onClose={() => setBoolUpdate(false)}
+          strUnsaved={(() => {
+            const boolUnsaved = arrTabs.some(objTab => objTab.kind === 'query' && objTab.filePath && hsDirty.has(objTab.id));
+            const boolTransaction = arrTabs.some(objTab => refTxTabIds.current.has(objTab.id));
+            return boolUnsaved || boolTransaction
+              ? `Some tabs have ${boolUnsaved ? 'unsaved changes' : ''}${boolUnsaved && boolTransaction ? ' and ' : ''}${boolTransaction ? 'an uncommitted transaction (it will be rolled back)' : ''}.`
+              : null;
+          })()} />
+      )}
       {boolSnippets && (
         <SnippetsDialog arrInitial={getSnippets()}
           onInsert={objEditor ? strBody => objEditor.insertSnippet(strBody) : null}
@@ -390,7 +424,8 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
       <ConnectionList
         arrConnections={arrConnections}
-        strActiveId={objActiveTab?.connectionId ?? null}
+        strActiveId={objActiveTab?.connectionId ?? strSelectedId}
+        onSelect={setStrSelectedId}
         hsOpenIds={new Set(arrTabs.map(objTab => objTab.connectionId))}
         strError={strLoadError}
         onOpen={open}
@@ -399,33 +434,37 @@ export default function App() {
         onDelete={remove}
         intWidth={intSidebarWidth}
         boolHidden={!boolSidebarOpen}
-      >
-        {objActiveConnection?.kind === 'Redis' && (
-          <RedisTree
-            key={objActiveConnection.id}
-            objConnection={objActiveConnection}
-            onOpenObject={objObject => openObject(objActiveConnection.id, objObject)}
-            onOpenSql={(strSql, boolAutoRun) => newQueryTab(objActiveConnection.id, strSql, boolAutoRun)}
-            objReveal={objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null}
-          />
-        )}
-        {objActiveConnection && objActiveConnection.kind !== 'Redis' && (
-          <ObjectTree
-            key={objActiveConnection.id}
-            objConnection={objActiveConnection}
-            objMetadata={dicMetadata[objActiveConnection.id]}
-            loadMetadata={loadMetadata}
-            onOpenObject={objObject => openObject(objActiveConnection.id, objObject)}
-            onOpenSql={(strSql, boolAutoRun) => newQueryTab(objActiveConnection.id, strSql, boolAutoRun)}
-            onExecuteRoutine={objRoutine => openObject(objActiveConnection.id, objRoutine, 'routine')}
-            objReveal={objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null}
-            onOpenData={objObject => newQueryTab(
-              objActiveConnection.id,
-              selectAllQuery(objActiveConnection.kind, objObject.schema, objObject.name),
-              true)}
-          />
-        )}
-      </ConnectionList>
+        renderTree={(objConnection, boolActive, objControl) => {
+          const objReveal = boolActive && objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null;
+          return objConnection.kind === 'Redis'
+            ? (
+              <RedisTree
+                objConnection={objConnection}
+                onOpenObject={objObject => openObject(objConnection.id, objObject)}
+                onOpenSql={(strSql, boolAutoRun) => newQueryTab(objConnection.id, strSql, boolAutoRun)}
+                objReveal={objReveal}
+              />
+            )
+            : (
+              <ObjectTree
+                objConnection={objConnection}
+                objMetadata={dicMetadata[objConnection.id]}
+                loadMetadata={loadMetadata}
+                onOpenObject={objObject => openObject(objConnection.id, objObject)}
+                onOpenSql={(strSql, boolAutoRun) => newQueryTab(objConnection.id, strSql, boolAutoRun)}
+                onExecuteRoutine={objRoutine => openObject(objConnection.id, objRoutine, 'routine')}
+                objReveal={objReveal}
+                strFilter={objControl.filter}
+                onFilter={objControl.onFilter}
+                intRefresh={objControl.refresh}
+                onOpenData={objObject => newQueryTab(
+                  objConnection.id,
+                  selectAllQuery(objConnection.kind, objObject.schema, objObject.name),
+                  true)}
+              />
+            );
+        }}
+      />
 
       {/* drag to resize the sidebar, double-click for the default width */}
       {boolSidebarOpen && (
@@ -545,6 +584,8 @@ export default function App() {
         </div>
       </main>
       </div>
+
+      <Toaster />
 
       {objDialog && (
         <ConnectionDialog

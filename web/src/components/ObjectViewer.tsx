@@ -154,6 +154,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   const [objState, setObjState] = useState<LoadState>({ status: 'loading' });
   const [strActive, setStrActive] = useState<string | null>(null);
   const [strCount, setStrCount] = useState<string | null>(null);
+  const [intCounted, setIntCounted] = useState<number | null>(null);
   const [intReload, setIntReload] = useState(0);
   const [objData, setObjData] = useState<DataState>({ status: 'idle' });
   // Whole-table export: null = idle. queryId is set while it runs (for Stop), path once the file exists.
@@ -201,10 +202,18 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
     try {
       const objResult = await api.query(crypto.randomUUID(), objConnection.id, countQuery(objConnection.kind, strSchema, strName), 1);
       setStrCount(`${Number(objResult.rows[0]?.[0]).toLocaleString()} rows`);
+      setIntCounted(Number(objResult.rows[0]?.[0]));
     } catch (objEx) {
       setStrCount(errorMessage(objEx));
     }
   };
+
+  // Number on the Data tab: every row loaded = exact; else the last Count rows, the rows loaded so far, the catalog's estimate.
+  const intEstimate = objMetadata?.tables.find(objTable => objTable.schema === strSchema && objTable.name === strName)?.rows;
+  const strDataCount = objData.status === 'done' && !objData.result.truncated ? objData.result.rows.length.toLocaleString()
+    : intCounted != null && Number.isFinite(intCounted) ? intCounted.toLocaleString()
+    : objData.status === 'done' ? `${objData.result.rows.length.toLocaleString()}+`
+    : intEstimate != null ? intEstimate.toLocaleString() : null;
 
   const loadData = async () => {
     setObjData({ status: 'loading' });
@@ -256,7 +265,9 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   const objSection = objDetail?.sections.find(objItem => objItem.title === strShown);
   // Nothing to show on top (e.g. a procedure without sections): the DDL takes the whole tab.
   const boolTop = arrTabs.length > 0;
-  const boolDdlShown = !boolRoutine && (boolDdl || !boolTop);
+  // Under the structure tab (Columns / Fields) only: data and the other grids get the whole height.
+  const boolDdlTab = strShown === arrTabs[0];
+  const boolDdlShown = !boolRoutine && ((boolDdl && boolDdlTab) || !boolTop);
 
   const boolEditingShown = strEditing !== null && strEditing === strShown;
   const objColumnsGrid = objDetail?.sections.find(objItem => objItem.title === COLUMNS_TAB)?.result;
@@ -347,6 +358,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                     className={`h-7 whitespace-nowrap rounded-t border border-b-0 px-3 text-xs ${
                       strTab === strShown ? 'border-line bg-panel' : 'border-transparent text-muted hover:bg-hover'}`}>
                     {strTab}
+                    {strTab === DATA_TAB && strDataCount && <span className="ml-1.5 text-muted" title="Rows">{strDataCount}</span>}
                     {strTab !== DATA_TAB && strTab !== DIAGRAM_TAB && strTab !== SOURCE_TAB && (
                       <span className="ml-1.5 text-muted">
                         {objDetail.sections.find(objItem => objItem.title === strTab)?.result.rows.length}
@@ -367,7 +379,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                       <button className="btn h-6 px-2" onClick={() => onOpenSql(objDetail.ddl ?? '', false)}>Open in editor</button>
                     </>
                   )}
-                  {!boolRoutine && (
+                  {!boolRoutine && boolDdlTab && (
                     <button className={`btn h-6 px-2 ${boolDdl ? 'text-accent' : ''}`} aria-pressed={boolDdl}
                       title="Show or hide the DDL below" onClick={() => setBoolDdl(boolPrev => !boolPrev)}>DDL</button>
                   )}

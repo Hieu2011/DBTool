@@ -21,6 +21,9 @@ public abstract partial class AdoProviderBase : IDbProvider
     /// Rows must be ordered by schema, table, column position.</summary>
     protected abstract string MetadataSql { get; }
 
+    /// <summary>schema, table, estimated rows: read from statistics, never a COUNT(*). Null = not supported.</summary>
+    protected virtual string? RowCountsSql => null;
+
     protected virtual string PrepareSql(string strSql) => strSql;
 
     protected virtual object? ReadValue(DbDataReader objReader, int intOrdinal) => objReader.GetValue(intOrdinal);
@@ -215,6 +218,27 @@ public abstract partial class AdoProviderBase : IDbProvider
                 if (!objTable.Columns.Exists(objCol => objCol.Name == strColumn)) // Oracle can list a column twice (mview + table)
                     objTable.Columns.Add(new ColumnMeta(strColumn, objReader.IsDBNull(4) ? "" : objReader.GetString(4)));
             }
+        }
+
+        // Row estimates are a nicety: no statistics or no privilege just leaves them out.
+        if (RowCountsSql is { } strRowsSql)
+        {
+            try
+            {
+                var dicTables = lstTables.ToDictionary(objTable => (objTable.Schema, objTable.Name));
+                await using var objCmd = objConn.CreateCommand();
+                objCmd.CommandText = strRowsSql;
+                objCmd.CommandTimeout = 30;
+                BindParams(objCmd, ("schema", strSchema));
+                await using var objReader = await objCmd.ExecuteReaderAsync(objCancelToken);
+                while (await objReader.ReadAsync(objCancelToken))
+                {
+                    if (objReader.IsDBNull(2)) continue;
+                    if (dicTables.TryGetValue((objReader.GetString(0), objReader.GetString(1)), out var objTable))
+                        objTable.Rows = Convert.ToInt64(objReader.GetValue(2));
+                }
+            }
+            catch (DbException) { }
         }
 
         // Autocomplete only needs the tables: a failure here must not cost the user that.
