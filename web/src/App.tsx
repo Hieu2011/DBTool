@@ -391,7 +391,7 @@ export default function App() {
     {
       label: 'Help',
       items: [
-        { label: 'Check for updates…', onSelect: () => setBoolUpdate(true) },
+        { label: 'About DbStudio / Check for updates…', onSelect: () => setBoolUpdate(true) },
       ],
     },
   ];
@@ -443,6 +443,9 @@ export default function App() {
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 onOpenSql={(strSql, boolAutoRun) => newQueryTab(objConnection.id, strSql, boolAutoRun)}
                 objReveal={objReveal}
+                intRefresh={objControl.refresh}
+                onStatus={objControl.onStatus}
+                onError={objControl.onError}
               />
             )
             : (
@@ -457,6 +460,8 @@ export default function App() {
                 strFilter={objControl.filter}
                 onFilter={objControl.onFilter}
                 intRefresh={objControl.refresh}
+                onStatus={objControl.onStatus}
+                onError={objControl.onError}
                 onOpenData={objObject => newQueryTab(
                   objConnection.id,
                   selectAllQuery(objConnection.kind, objObject.schema, objObject.name),

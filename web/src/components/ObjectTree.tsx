@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api, ApiError } from '../api';
 import { showToast } from '../toast';
-import { TREE_STICKY_TOP, useOuterScroll } from './useOuterScroll';
+import { TREE_STICKY_TOP, useOuterScroll, type TreeStatus } from './useOuterScroll';
 import { qualifiedName, quoteIdent } from '../sql/identifiers';
 import {
   countScript, deleteScript, dropScript, executeScript, insertScript, nextValueScript, selectScript, updateScript,
@@ -32,6 +32,10 @@ interface Props {
   onFilter: (strFilter: string) => void;
   /** Goes up when the connection's Refresh button is pressed. */
   intRefresh: number;
+  /** Tells the sidebar how the connection is doing (the dot on its row). */
+  onStatus: (strStatus: TreeStatus) => void;
+  /** A load failed: the sidebar shows the message in a dialog. */
+  onError: (strMessage: string, boolRefresh: boolean) => void;
 }
 
 /** 1234 → 1,234; 15300 → 15.3K; 2400000 → 2.4M. */
@@ -194,7 +198,7 @@ function groupObjects(objMetadata: SchemaMetadata, arrFixedGroups: [string, stri
 }
 
 export function ObjectTree({
-  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine, objReveal, strFilter, onFilter, intRefresh,
+  objConnection, objMetadata, loadMetadata, onOpenObject, onOpenData, onOpenSql, onExecuteRoutine, objReveal, strFilter, onFilter, intRefresh, onStatus, onError,
 }: Props) {
   // Row of the active tab's object; strScrollTo: still to be scrolled into view (its rows may not exist yet).
   const [strCurrentKey, setStrCurrentKey] = useState<string | null>(null);
@@ -235,7 +239,7 @@ export function ObjectTree({
       },
       objEx => {
         setStrState(errorMessage(objEx));
-        showToast('error', `${objConnection.name}: ${boolRefresh ? 'refresh' : 'connection'} failed`, errorMessage(objEx));
+        onError(errorMessage(objEx), refConnected.current);
       },
     );
   };
@@ -443,6 +447,10 @@ export function ObjectTree({
     scrollMargin: intMargin,
     scrollPaddingStart: TREE_STICKY_TOP,
   });
+
+  const strStatus: TreeStatus = strState === 'loading' ? 'loading' : objMetadata ? 'ok' : strState === 'idle' ? 'idle' : 'failed';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onStatus(strStatus); }, [strStatus]);
 
   const refRefresh = useRef(intRefresh);
   useEffect(() => {
@@ -660,8 +668,11 @@ export function ObjectTree({
       {(strState === 'loading' || boolScripting) && (
         <p className="px-3 py-1 text-muted">{boolScripting ? 'Building DDL…' : objMetadata ? 'Reloading objects…' : 'Connecting…'}</p>
       )}
-      {strState !== 'idle' && strState !== 'loading' && !objMetadata && (
-        <p className="mx-2 mb-1.5 rounded border border-danger/40 p-2 text-xs text-danger">{strState}</p>
+      {strStatus === 'failed' && (
+        <p className="flex items-center gap-2 px-3 py-1 text-danger" title={strState}>
+          <span className="min-w-0 flex-1 truncate">Not connected: {strState}</span>
+          <button className="btn h-5 px-2 text-[11px] text-fg" onClick={() => load(false)}>Retry</button>
+        </p>
       )}
       {objMetadata?.objectsError && (
         <p className="mx-2 mb-1.5 rounded border border-line p-2 text-xs text-muted" title={objMetadata.objectsError}>

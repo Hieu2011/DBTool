@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { api, ApiError } from '../api';
 import { showToast } from '../toast';
-import { TREE_STICKY_TOP, useOuterScroll } from './useOuterScroll';
+import { TREE_STICKY_TOP, useOuterScroll, type TreeStatus } from './useOuterScroll';
 import { redisQuote } from '../sql/dialect';
 import type { Connection, DbObjectInfo, RedisDatabaseInfo, RedisKeyInfo } from '../types';
 import { ContextMenu, type MenuItem } from './ContextMenu';
@@ -16,6 +16,11 @@ interface Props {
   onOpenSql: (strCommands: string, boolAutoRun?: boolean) => void;
   /** The key of the active tab (schema `dbN`): the tree switches to its database, opens its folders and shows it. */
   objReveal?: DbObjectInfo | null;
+  /** Goes up when the connection's Refresh button is pressed. */
+  intRefresh: number;
+  onStatus: (strStatus: TreeStatus) => void;
+  /** A scan failed: the sidebar shows the message in a dialog. */
+  onError: (strMessage: string, boolRefresh: boolean) => void;
 }
 
 const ROW_H = 22;
@@ -45,7 +50,7 @@ const toPattern = (strFilter: string) => {
 };
 
 /** Keys of one Redis database, grouped into folders at each `:`. Loaded page by page with SCAN. */
-export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal }: Props) {
+export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal, intRefresh, onStatus, onError }: Props) {
   // Row of the active tab's key; strScrollTo: still to be scrolled into view.
   const [strCurrent, setStrCurrent] = useState<string | null>(null);
   const [strScrollTo, setStrScrollTo] = useState<string | null>(null);
@@ -92,7 +97,7 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal }:
     } catch (objEx) {
       if (intLoad !== refLoad.current) return;
       setStrState(errorMessage(objEx));
-      showToast('error', `${objConnection.name}: key scan failed`, errorMessage(objEx));
+      onError(errorMessage(objEx), refConnected.current);
     }
   }, [objConnection.id, objConnection.name]);
 
@@ -335,6 +340,18 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal }:
     ];
   };
 
+  const strStatus: TreeStatus = strState === 'loading' ? 'loading' : strState !== 'idle' ? 'failed' : refConnected.current ? 'ok' : 'idle';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onStatus(strStatus); }, [strStatus]);
+
+  const refRefresh = useRef(intRefresh);
+  useEffect(() => {
+    if (refRefresh.current === intRefresh) return;
+    refRefresh.current = intRefresh;
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intRefresh]);
+
   const objCurrent = arrDatabases.find(objItem => objItem.index === intDatabase);
   const boolMore = strCursor !== '0';
 
@@ -363,8 +380,11 @@ export function RedisTree({ objConnection, onOpenObject, onOpenSql, objReveal }:
           value={strFilter} onChange={objEvent => setStrFilter(objEvent.target.value)} />
       </form>
 
-      {strState !== 'idle' && strState !== 'loading' && (
-        <p className="mx-2 mb-1.5 rounded border border-danger/40 p-2 text-xs text-danger">{strState}</p>
+      {strStatus === 'failed' && (
+        <p className="flex items-center gap-2 px-3 py-1 text-xs text-danger" title={strState}>
+          <span className="min-w-0 flex-1 truncate">{refConnected.current ? 'Scan failed' : 'Not connected'}: {strState}</span>
+          <button className="btn h-5 px-2 text-[11px] text-fg" onClick={refresh}>Retry</button>
+        </p>
       )}
 
       <div ref={refList} className="text-xs">

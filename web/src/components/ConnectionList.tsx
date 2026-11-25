@@ -3,9 +3,17 @@ import type { Connection } from '../types';
 import { KIND_LABEL } from '../types';
 import { envVar } from '../envColor';
 import { IconChevronDown, IconChevronRight, IconClose, IconPencil, IconPlus, IconRefresh, IconTrash, KindIcon } from './icons';
+import type { TreeStatus } from './useOuterScroll';
 
 /** What the sidebar hands each tree: the one filter box and the Refresh button of its connection's row. */
-export interface TreeControl { filter: string; onFilter: (strFilter: string) => void; refresh: number }
+export interface TreeControl {
+  filter: string; onFilter: (strFilter: string) => void; refresh: number;
+  onStatus: (strStatus: TreeStatus) => void;
+  onError: (strMessage: string, boolRefresh: boolean) => void;
+}
+
+const STATUS_COLOR: Record<TreeStatus, string> = { idle: 'var(--muted)', loading: 'var(--env-amber)', ok: 'var(--success)', failed: 'var(--danger)' };
+const STATUS_LABEL: Record<TreeStatus, string> = { idle: 'Not connected', loading: 'Connecting…', ok: 'Connected', failed: 'Connection failed' };
 
 interface Props {
   arrConnections: Connection[];
@@ -40,6 +48,17 @@ export function ConnectionList({
   const [hsMounted, setHsMounted] = useState<Set<string>>(new Set());
   const [strFilter, setStrFilter] = useState('');
   const [dicRefresh, setDicRefresh] = useState<Record<string, number>>({});
+  const [dicStatus, setDicStatus] = useState<Record<string, TreeStatus>>({});
+  const [objFailure, setObjFailure] = useState<{ id: string; message: string; refresh: boolean } | null>(null);
+  const retry = (strId: string) => setDicRefresh(dicPrev => ({ ...dicPrev, [strId]: (dicPrev[strId] ?? 0) + 1 }));
+  const objFailed = objFailure ? arrConnections.find(objItem => objItem.id === objFailure.id) : undefined;
+
+  useEffect(() => {
+    if (!objFailure) return;
+    const onKey = (objEvent: KeyboardEvent) => objEvent.key === 'Escape' && setObjFailure(null);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [objFailure]);
 
   const expand = (strId: string) => {
     setHsExpanded(hsPrev => (hsPrev.has(strId) ? hsPrev : new Set(hsPrev).add(strId)));
@@ -98,6 +117,7 @@ export function ConnectionList({
             const boolExpanded = hsExpanded.has(strId);
             const boolOpen = hsOpenIds.has(strId);
             const Chevron = boolExpanded ? IconChevronDown : IconChevronRight;
+            const strStatus = dicStatus[strId] ?? 'idle';
             return (
               <section key={strId} aria-label={objConnection.name}>
                 {/* h-9 = TREE_STICKY_TOP: stays on top while its own tree scrolls under it */}
@@ -114,7 +134,7 @@ export function ConnectionList({
                   onDoubleClick={() => onEdit(objConnection)}
                   title={`Name: ${objConnection.name}\n${KIND_LABEL[objConnection.kind]}: ${objConnection.host}:${objConnection.port}${objConnection.database ? `/${objConnection.database}` : ''}${objConnection.username ? `\nUser: ${objConnection.username}` : ''}`}
                   className={`group sticky top-0 z-20 flex h-9 items-center gap-1.5 pl-1.5 pr-1.5 ${boolActive ? 'bg-panel' : 'bg-bg'} hover:bg-hover`}
-                  style={{ boxShadow: `inset 3px 0 0 ${boolActive ? envVar(objConnection.color) : 'transparent'}` }}
+                  style={{ boxShadow: `inset 3px 0 0 ${boolActive || objConnection.color !== 'slate' ? envVar(objConnection.color) : 'transparent'}` }}
                 >
                   <button className="icon-btn icon-btn-sm h-5 min-w-5 px-0" aria-label={boolExpanded ? 'Collapse' : 'Expand'}
                     onClick={objEvent => { objEvent.stopPropagation(); toggle(strId); }}
@@ -123,13 +143,13 @@ export function ConnectionList({
                   </button>
                   <KindIcon strKind={objConnection.kind} intSize={17} boolMuted={!boolOpen && !boolExpanded} />
                   <span className={`shrink-0 truncate ${boolOpen ? 'font-semibold' : 'font-medium'}`} style={{ maxWidth: '60%' }}>{objConnection.name}</span>
-                  {boolOpen && <span className="status-dot" data-state="open" title="Has open tabs" />}
                   <span className="min-w-0 flex-1 truncate text-[11px] italic text-muted">{objConnection.host}:{objConnection.port}</span>
-                  <span className="h-2 w-2 shrink-0 rounded-full group-hover:hidden" style={{ background: envVar(objConnection.color) }} />
+                  <span className="h-2 w-2 shrink-0 rounded-full group-hover:hidden" title={STATUS_LABEL[strStatus]}
+                    style={{ background: STATUS_COLOR[strStatus], opacity: strStatus === 'idle' ? 0.45 : 1 }} />
                   <div className="hidden gap-0.5 group-hover:flex group-focus-within:flex">
-                    {boolExpanded && objConnection.kind !== 'Redis' && (
-                      <button className="icon-btn icon-btn-sm" aria-label={`Refresh ${objConnection.name}`} title="Reload the object list"
-                        onClick={objEvent => { objEvent.stopPropagation(); setDicRefresh(dicPrev => ({ ...dicPrev, [strId]: (dicPrev[strId] ?? 0) + 1 })); }}>
+                    {boolExpanded && (
+                      <button className="icon-btn icon-btn-sm" aria-label={`Refresh ${objConnection.name}`} title="Connect again and reload the list"
+                        onClick={objEvent => { objEvent.stopPropagation(); retry(strId); }}>
                         <IconRefresh intSize={14} />
                       </button>
                     )}
@@ -146,7 +166,11 @@ export function ConnectionList({
 
                 {hsMounted.has(strId) && (
                   <div className={`pl-3 ${boolExpanded ? '' : 'hidden'}`}>
-                    {renderTree(objConnection, boolActive, { filter: strFilter, onFilter: setStrFilter, refresh: dicRefresh[strId] ?? 0 })}
+                    {renderTree(objConnection, boolActive, {
+                      filter: strFilter, onFilter: setStrFilter, refresh: dicRefresh[strId] ?? 0,
+                      onStatus: strNext => setDicStatus(dicPrev => (dicPrev[strId] === strNext ? dicPrev : { ...dicPrev, [strId]: strNext })),
+                      onError: (strMessage, boolRefresh) => setObjFailure({ id: strId, message: strMessage, refresh: boolRefresh }),
+                    })}
                   </div>
                 )}
               </section>
@@ -157,6 +181,33 @@ export function ConnectionList({
           )}
         </div>
       </div>
+      {objFailure && objFailed && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/35" onMouseDown={() => setObjFailure(null)}>
+          <div role="alertdialog" aria-label="Connection error" onMouseDown={objEvent => objEvent.stopPropagation()}
+            className="w-[34rem] max-w-[90vw] rounded-md border border-line bg-raised text-[13px] shadow-2xl" style={{ borderTop: '3px solid var(--danger)' }}>
+            <div className="flex items-center gap-2.5 border-b border-line py-2 pl-4 pr-2">
+              <KindIcon strKind={objFailed.kind} intSize={20} />
+              <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{objFailure.refresh ? 'Refresh error' : 'Connection error'}</h2>
+              <button type="button" className="icon-btn" onClick={() => setObjFailure(null)} aria-label="Close" title="Close (Esc)"><IconClose /></button>
+            </div>
+            <div className="p-4">
+              <p className="mb-2.5">
+                {objFailure.refresh ? 'Could not reload' : 'Could not connect to'} <b>{objFailed.name}</b>
+                <span className="text-muted"> ({KIND_LABEL[objFailed.kind]} · {objFailed.host}:{objFailed.port})</span>
+              </p>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-xs text-danger"
+                style={{ userSelect: 'text' }}>{objFailure.message}</pre>
+            </div>
+            <div className="flex items-center gap-2 border-t border-line px-4 py-3">
+              <button className="btn" onClick={() => navigator.clipboard.writeText(objFailure.message)}>Copy details</button>
+              <span className="flex-1" />
+              <button className="btn" onClick={() => { setObjFailure(null); onEdit(objFailed); }}>Edit connection…</button>
+              <button className="btn" onClick={() => { setObjFailure(null); retry(objFailed.id); }}>Retry</button>
+              <button className="btn btn-primary" autoFocus onClick={() => setObjFailure(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

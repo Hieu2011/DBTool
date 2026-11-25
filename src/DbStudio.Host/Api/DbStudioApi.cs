@@ -50,13 +50,13 @@ internal static class DbStudioApi
         objApi.MapPut("/update/config", (UpdateConfigInput objInput, UpdateService objUpdates) =>
         {
             try { return Results.Ok(objUpdates.SaveConfig(objInput)); }
-            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message, null, objEx.Code)); }
         });
 
         objApi.MapPost("/update/check", async (UpdateService objUpdates, CancellationToken objCancelToken) =>
         {
             try { return Results.Ok(await objUpdates.CheckAsync(objCancelToken)); }
-            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message, null, objEx.Code)); }
         });
 
         // Downloads, verifies, swaps the exe and restarts. Not tied to the request: closing the dialog must not leave half an update.
@@ -67,7 +67,7 @@ internal static class DbStudioApi
                 await objUpdates.ApplyAsync(CancellationToken.None);
                 return Results.NoContent();
             }
-            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message)); }
+            catch (UpdateException objEx) { return Results.BadRequest(new QueryError(objEx.Message, null, objEx.Code)); }
         });
 
         objApi.MapGet("/update/progress", (UpdateService objUpdates) =>

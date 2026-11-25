@@ -18,7 +18,12 @@ public sealed record UpdateInfo(string CurrentVersion, string LatestVersion, boo
 
 public sealed record UpdateProgress(long Received, long? Total);
 
-internal sealed class UpdateException(string strMessage) : Exception(strMessage);
+/// <summary>Code "UpdateAuth": the link's password is missing, wrong or unreadable (the UI then asks for it).</summary>
+internal sealed class UpdateException(string strMessage, string? strCode = null) : Exception(strMessage)
+{
+    public const string Auth = "UpdateAuth";
+    public string? Code { get; } = strCode;
+}
 
 /// <summary>
 /// Self-update from a public share link of a Nextcloud / ownCloud folder (https://host/index.php/s/TOKEN) that holds
@@ -187,7 +192,7 @@ internal sealed partial class UpdateService
         if (!string.IsNullOrEmpty(objStored.ProtectedPassword))
         {
             try { strPassword = Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(objStored.ProtectedPassword), Entropy, DataProtectionScope.CurrentUser)); }
-            catch (Exception objEx) when (objEx is CryptographicException or FormatException) { throw new UpdateException("The saved password of the update link cannot be read on this account. Type it again."); }
+            catch (Exception objEx) when (objEx is CryptographicException or FormatException) { throw new UpdateException("The saved password of the update link cannot be read on this account. Type it again.", UpdateException.Auth); }
         }
 
         using var objRequest = new HttpRequestMessage(HttpMethod.Get, $"{strRoot}/public.php/webdav/{Uri.EscapeDataString(strName)}");
@@ -200,12 +205,11 @@ internal sealed partial class UpdateService
         if (objResponse.IsSuccessStatusCode) return objResponse;
         var enmStatus = objResponse.StatusCode;
         objResponse.Dispose();
-        throw new UpdateException(enmStatus switch
-        {
-            HttpStatusCode.Unauthorized => "The update link refused the password (or needs one).",
-            HttpStatusCode.NotFound => $"{strName} was not found in the shared folder (or the link no longer exists).",
-            _ => $"The update server answered {(int)enmStatus} for {strName}.",
-        });
+        if (enmStatus == HttpStatusCode.Unauthorized)
+            throw new UpdateException(strPassword.Length == 0 ? "The update link needs its password." : "The update link refused the saved password. Type the current one.", UpdateException.Auth);
+        throw new UpdateException(enmStatus == HttpStatusCode.NotFound
+            ? $"{strName} was not found in the shared folder (or the link no longer exists)."
+            : $"The update server answered {(int)enmStatus} for {strName}.");
     }
 
     /// <summary>https://host[/path]/index.php/s/TOKEN (or /s/TOKEN) -> the server root and the share token.</summary>

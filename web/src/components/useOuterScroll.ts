@@ -1,5 +1,8 @@
 import { useLayoutEffect, useState, type RefObject } from 'react';
 
+/** How a connection's tree is doing, for the dot on its row. */
+export type TreeStatus = 'idle' | 'loading' | 'ok' | 'failed';
+
 /** Height of a connection's header: it stays stuck at the top of the sidebar while its tree scrolls under it. */
 export const TREE_STICKY_TOP = 36;
 
