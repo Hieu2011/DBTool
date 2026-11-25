@@ -122,6 +122,19 @@ internal static class DbStudioApi
             }
         });
 
+        // ---------- workspace (editor tabs of the last run) ----------
+        objApi.MapGet("/workspace", (WorkspaceStore objWorkspaces) =>
+            objWorkspaces.Load() is { } objSaved ? Results.Json(objSaved) : Results.NoContent());
+
+        objApi.MapPut("/workspace", (Workspace objWorkspace, WorkspaceStore objWorkspaces) =>
+        {
+            try { objWorkspaces.Save(objWorkspace); return Results.NoContent(); }
+            catch (Exception objEx) when (objEx is IOException or UnauthorizedAccessException)
+            {
+                return Results.BadRequest(new QueryError(objEx.Message));
+            }
+        });
+
         // ---------- query history ----------
         objApi.MapGet("/connections/{guidId:guid}/history", (Guid guidId, HistoryStore objHistory) => objHistory.List(guidId, 500));
 

@@ -47,6 +47,7 @@ internal static class ApiHost
         objBuilder.Services.AddSingleton<SettingsStore>();
         objBuilder.Services.AddSingleton<HistoryStore>();
         objBuilder.Services.AddSingleton<SnippetStore>();
+        objBuilder.Services.AddSingleton<WorkspaceStore>();
         objBuilder.Services.AddSingleton<UpdateService>();
 
         var objApp = objBuilder.Build();

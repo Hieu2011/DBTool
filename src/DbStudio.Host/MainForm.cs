@@ -7,6 +7,7 @@ namespace DbStudio.Host;
 internal sealed class MainForm : Form
 {
     private readonly WebView2 _objWeb = new() { Dock = DockStyle.Fill };
+    private bool _boolTabsSaved;
 
     public MainForm(string strUrl, string? strToken, bool boolDev, ExportTargets objExportTargets, SqlFiles objSqlFiles,
         SettingsStore objSettings, UpdateService objUpdates)
@@ -21,8 +22,19 @@ internal sealed class MainForm : Form
         // The exe's own icon (ApplicationIcon); the default one stays if it cannot be read.
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
         RestorePlacement(objSettings.Window);
-        FormClosing += (_, _) =>
+        FormClosing += async (_, objArgs) =>
         {
+            // First the UI saves its open tabs (a blocking request in the page), then the window really closes.
+            if (!_boolTabsSaved && _objWeb.CoreWebView2 is { } objPage)
+            {
+                _boolTabsSaved = true;
+                objArgs.Cancel = true;
+                try { await Task.WhenAny(objPage.ExecuteScriptAsync("window.__dbstudioSaveTabs && window.__dbstudioSaveTabs()"), Task.Delay(2000)); }
+                catch (Exception) { /* the page is gone: nothing to save */ }
+                Close();
+                return;
+            }
+
             // Minimized or maximized: RestoreBounds is the normal window.
             var objBounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
             objSettings.Window = new WindowPlacement(objBounds.X, objBounds.Y, objBounds.Width, objBounds.Height,

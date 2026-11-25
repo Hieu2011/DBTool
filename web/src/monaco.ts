@@ -4,6 +4,13 @@ import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 // Load Monaco from the bundle (no CDN): the app must work offline.
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
+// Column (block) selection from the keyboard, as in dbForge / Visual Studio: Alt + Shift + arrows.
+monaco.editor.addKeybindingRules((['Up', 'Down', 'Left', 'Right'] as const).map(strArrow => ({
+  keybinding: monaco.KeyMod.Alt | monaco.KeyMod.Shift | monaco.KeyCode[`${strArrow}Arrow`],
+  command: `cursorColumnSelect${strArrow}`,
+  when: 'textInputFocus',
+})));
+
 // MongoDB shell statements and scripts: no language service, only colors, brackets and comments.
 const arrPairs = [
   { open: '{', close: '}' }, { open: '[', close: ']' }, { open: '(', close: ')' },

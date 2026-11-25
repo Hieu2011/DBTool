@@ -2,6 +2,19 @@
 
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
+## 1.1.2 — 2026-11-25
+
+- Editor: chọn khối cột để sửa đồng loạt (Alt + kéo chuột, Alt + Shift + mũi tên), Ctrl + click thêm con trỏ
+- Ctrl+F / Ctrl+H mở tìm / thay thế của editor kể cả khi đang đứng ở lưới hay cây
+- Thanh công cụ có ô chọn connection: đổi connection của tab mà vẫn giữ nội dung đang gõ
+- Giữ phiên làm việc: tắt app mở lại vẫn còn các tab editor và nội dung chưa lưu (giữ 7 ngày)
+- Gợi ý: sau WHERE / ON chỉ còn alias và cột của các bảng trong câu lệnh, cột hiện kèm alias (PS.STOREID), chọn alias thì ra cột của nó
+- Gợi ý: sau tên bảng / alias là WHERE, JOIN… thay vì danh sách bảng
+- Gợi ý: sau FROM / JOIN có cả tên schema (chọn MASTERDATA thì ra bảng của nó)
+- Hết giật khi gõ trên schema lớn (gợi ý sau FROM / JOIN không còn quét lại toàn bộ danh sách bảng)
+- PostgreSQL: snippet chèn keyword chữ thường (Oracle vẫn in hoa)
+- Thanh công cụ không còn bị cắt trên màn hình nhỏ
+
 ## 1.1.1 — 2026-11-25
 
 - Form Updates hiện ngày phát hành của bản trên thư mục update

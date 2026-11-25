@@ -1,10 +1,14 @@
 import type {
   Connection, ConnectionInput, DbObjectInfo, ExportResult, HistoryEntry, ObjectDetail, QueryError, QueryResult, RoutineArgument, RoutineInfo,
-  RedisDatabaseInfo, RedisKeyPage, ResultOrigin, RoutineResult, SchemaMetadata, Snippet, UpdateConfig, UpdateInfo,
+  RedisDatabaseInfo, RedisKeyPage, ResultOrigin, RoutineResult, SchemaMetadata, Snippet, UpdateConfig, UpdateInfo, Workspace,
 } from './types';
 
 declare global {
-  interface Window { __DBSTUDIO_TOKEN__?: string }
+  interface Window {
+    __DBSTUDIO_TOKEN__?: string;
+    /** Called by the host window just before it closes. */
+    __dbstudioSaveTabs?: () => void;
+  }
 }
 
 /** Thrown for any non-2xx response; carries the server's QueryError. */
@@ -188,6 +192,18 @@ export const api = {
     request<RedisKeyPage>(`/connections/${strConnectionId}/redis/keys?${new URLSearchParams({
       db: String(intDatabase), pattern: strPattern, cursor: strCursor,
     })}`),
+
+  /** The editor tabs of the last run; null when there are none (or they are older than a week). */
+  workspace: () => request<Workspace | null>('/workspace'),
+  saveWorkspace: (objWorkspace: Workspace) => request<void>('/workspace', { method: 'PUT', body: JSON.stringify(objWorkspace) }),
+  /** Blocking, for the moment the window closes: an async request would die with the page. */
+  saveWorkspaceSync: (objWorkspace: Workspace) => {
+    const objRequest = new XMLHttpRequest();
+    objRequest.open('PUT', '/api/workspace', false);
+    objRequest.setRequestHeader('Content-Type', 'application/json');
+    if (window.__DBSTUDIO_TOKEN__) objRequest.setRequestHeader('X-DbStudio-Token', window.__DBSTUDIO_TOKEN__);
+    objRequest.send(JSON.stringify(objWorkspace));
+  },
 
   snippets: () => request<Snippet[]>('/snippets'),
   /** Replaces the whole list; resolves to the list as stored. */

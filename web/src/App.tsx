@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
-import type { Connection, DbObjectInfo, SchemaMetadata } from './types';
+import type { Connection, DbObjectInfo, SchemaMetadata, Workspace } from './types';
 import { ConnectionList } from './components/ConnectionList';
 import { Toaster } from './components/Toaster';
 import { ConnectionDialog, type DialogState } from './components/ConnectionDialog';
@@ -26,6 +26,8 @@ type AppTab =
     id: string; connectionId: string; kind: 'query'; number: number; initialSql?: string; autoRun?: boolean;
     /** Set for a tab opened from, or saved to, a .sql file: its file name and full path. */
     title?: string; filePath?: string;
+    /** Brought back from the last run: it connects when it is first used, not all of them at start. */
+    restored?: boolean;
   }
   | { id: string; connectionId: string; kind: 'object'; object: DbObjectInfo }
   /** The form that runs a procedure / function. */
@@ -98,6 +100,8 @@ export default function App() {
       const strKey = `${objEvent.shiftKey ? 'shift+' : ''}${objEvent.key.toLowerCase()}`;
       const fnAction = refShortcuts.current[strKey];
       if (!fnAction) return;
+      // Find / Replace inside an editor is Monaco's own business (also the read-only DDL / Source views).
+      if ((strKey === 'f' || strKey === 'h') && (objEvent.target as Element | null)?.closest?.('.monaco-editor')) return;
       objEvent.preventDefault();
       objEvent.stopPropagation();
       fnAction();
@@ -111,9 +115,65 @@ export default function App() {
     else refEditors.current.delete(strTabId);
   }, []);
 
+  // ---- editor tabs survive closing the app (server side: workspace.json, kept a week) ----
+  const refSession = useRef({ arrTabs, strActiveTabId, hsDirty });
+  refSession.current = { arrTabs, strActiveTabId, hsDirty };
+  const refRestored = useRef(false); // nothing is saved before the last session was read: it would be overwritten
+  const refSaveTimer = useRef<number | undefined>(undefined);
+
+  const snapshot = useCallback((): Workspace => {
+    const objNow = refSession.current;
+    return {
+      activeTabId: objNow.strActiveTabId,
+      tabs: objNow.arrTabs.flatMap(objTab => (objTab.kind === 'query'
+        ? [{
+          id: objTab.id, connectionId: objTab.connectionId, number: objTab.number, title: objTab.title ?? null, filePath: objTab.filePath ?? null,
+          text: refEditors.current.get(objTab.id)?.getSql() ?? objTab.initialSql ?? '', dirty: objNow.hsDirty.has(objTab.id),
+        }]
+        : [])),
+    };
+  }, []);
+
+  const scheduleSave = useCallback(() => {
+    if (!refRestored.current) return;
+    clearTimeout(refSaveTimer.current);
+    refSaveTimer.current = window.setTimeout(() => { api.saveWorkspace(snapshot()).catch(() => {}); }, 600);
+  }, [snapshot]);
+
+  useEffect(scheduleSave, [arrTabs, strActiveTabId, hsDirty, scheduleSave]);
+
+  // The host window calls this just before it closes.
+  useEffect(() => {
+    window.__dbstudioSaveTabs = () => {
+      clearTimeout(refSaveTimer.current);
+      if (refRestored.current) api.saveWorkspaceSync(snapshot());
+    };
+    return () => { delete window.__dbstudioSaveTabs; };
+  }, [snapshot]);
+
+  const refRestoreStarted = useRef(false);
+  useEffect(() => {
+    if (refRestoreStarted.current) return;
+    refRestoreStarted.current = true;
+    Promise.all([api.listConnections(), api.workspace()]).then(([arrKnown, objSaved]) => {
+      // Tabs of a connection deleted meanwhile have nowhere to run.
+      const arrSaved = (objSaved?.tabs ?? []).filter(objTab => arrKnown.some(objItem => objItem.id === objTab.connectionId));
+      if (arrSaved.length === 0) return;
+      const arrRestored: AppTab[] = arrSaved.map(objTab => ({
+        id: objTab.id, connectionId: objTab.connectionId, kind: 'query', number: objTab.number, initialSql: objTab.text,
+        title: objTab.title ?? undefined, filePath: objTab.filePath ?? undefined, restored: true,
+      }));
+      const strActive = arrSaved.find(objTab => objTab.id === objSaved?.activeTabId)?.id ?? arrSaved[0].id;
+      setArrTabs(arrPrev => [...arrRestored, ...arrPrev]);
+      setStrActiveTabId(strPrev => strPrev ?? strActive);
+      setHsDirty(hsPrev => new Set([...hsPrev, ...arrSaved.filter(objTab => objTab.dirty).map(objTab => objTab.id)]));
+    }).catch(() => {}).finally(() => { refRestored.current = true; });
+  }, []);
+
   const markDirty = useCallback((strTabId: string) => {
     setHsDirty(hsPrev => (hsPrev.has(strTabId) ? hsPrev : new Set(hsPrev).add(strTabId)));
-  }, []);
+    scheduleSave();
+  }, [scheduleSave]);
 
   const startSidebarResize = (objEvent: React.PointerEvent) => {
     objEvent.preventDefault();
@@ -292,6 +352,19 @@ export default function App() {
     return objConnection ? [{ objTab, objConnection }] : [];
   });
 
+  /** The toolbar's connection box: the tab keeps its text (and file), its editor restarts on the other connection. */
+  const changeTabConnection = useCallback((strTabId: string, strConnectionId: string) => {
+    const strSql = refEditors.current.get(strTabId)?.getSql();
+    setArrTabs(arrPrev => arrPrev.map(objTab => {
+      if (objTab.id !== strTabId || objTab.kind !== 'query' || objTab.connectionId === strConnectionId) return objTab;
+      const arrNumbers = arrPrev.map(objOther => (objOther.kind === 'query' && objOther.connectionId === strConnectionId ? objOther.number : 0));
+      return {
+        ...objTab, connectionId: strConnectionId, initialSql: strSql ?? objTab.initialSql, autoRun: false, restored: false,
+        number: objTab.filePath ? 0 : Math.max(0, ...arrNumbers) + 1,
+      };
+    }));
+  }, []);
+
   const tabLabel = (objTab: AppTab, objConnection: Connection) =>
     objTab.kind === 'query'
       ? objTab.title ?? `${objConnection.name}${objTab.number > 1 ? ` (${objTab.number})` : ''}`
@@ -319,6 +392,8 @@ export default function App() {
     'shift+s': () => { saveActiveTab(true); },
     w: () => { if (objActiveTab) closeTab(objActiveTab); },
     'shift+h': () => { if (objActiveConnection) setBoolHistory(true); },
+    // Focus outside the editor (grid, tree): still the editor's Find / Replace.
+    ...(boolQueryTab ? { f: editorAction('actions.find'), h: editorAction('editor.action.startFindReplaceAction') } : {}),
   };
 
   const arrMenus: MenuDef[] = [
@@ -563,7 +638,10 @@ export default function App() {
             )
             : (
               <QueryWorkspace
-                key={objTab.id}
+                // another connection = a new editor: session, dialect and metadata all belong to the connection
+                key={`${objTab.id}:${objTab.connectionId}`}
+                arrConnections={arrConnections}
+                onChangeConnection={changeTabConnection}
                 strTabId={objTab.id}
                 objConnection={objConnection}
                 boolActive={objTab.id === strActiveTabId}
@@ -575,6 +653,7 @@ export default function App() {
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 strInitialSql={objTab.initialSql}
                 boolAutoRun={objTab.autoRun}
+                boolLazyConnect={objTab.restored && objTab.id !== strActiveTabId}
               />
             )))}
 

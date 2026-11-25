@@ -142,7 +142,10 @@ const lowerSql = (strBody: string) => strBody.replace(/'[^']*'|\$[A-Z_]+|[A-Z][A
 
 const BY_DIALECT: Record<SnippetDialect, BuiltinSnippet[]> = {
   oracle: [...SQL_COMMON, ...ORACLE],
-  pgsql: [...SQL_COMMON, ...PGSQL].map(objSnippet => ({ ...objSnippet, body: lowerSql(objSnippet.body) })),
+  pgsql: [...SQL_COMMON, ...PGSQL].map(objSnippet => ({
+    ...objSnippet, body: lowerSql(objSnippet.body),
+    name: objSnippet.name.replace(/\b[A-Z]{2,}[A-Z_]*\b/g, strWord => strWord.toLowerCase()), // the description too: select … where
+  })),
   mongo: MONGO, redis: REDIS,
 };
 

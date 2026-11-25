@@ -17,7 +17,7 @@ import { envVar } from '../envColor';
 import { CodeView } from './CodeView';
 import { ResultGrid } from './ResultGrid';
 import { EditableResult } from './EditableResult';
-import { IconCheck, IconComment, IconFormat, IconPlay, IconPlayAll, IconPlug, IconRefresh, IconStop, IconUndo, IconUnplug } from './icons';
+import { KindIcon, IconCheck, IconComment, IconFormat, IconPlay, IconPlayAll, IconPlug, IconRefresh, IconStop, IconUndo, IconUnplug } from './icons';
 
 registerSqlCompletion(monaco);
 registerSqlFolding(monaco);
@@ -30,6 +30,10 @@ export const FORMAT_ACTION = 'dbstudio.formatSql';
 interface Props {
   strTabId: string;
   objConnection: Connection;
+  /** Every saved connection, for the toolbar's connection box. */
+  arrConnections: Connection[];
+  /** The tab moves to another connection: the app remounts this editor with the same text. */
+  onChangeConnection: (strTabId: string, strConnectionId: string) => void;
   boolActive: boolean;
   objMetadata: SchemaMetadata | undefined;
   loadMetadata: (strId: string, boolRefresh?: boolean, strSchema?: string) => Promise<SchemaMetadata>;
@@ -44,6 +48,8 @@ interface Props {
   /** Editor text for a tab opened from the object explorer; boolAutoRun runs it once. */
   strInitialSql?: string;
   boolAutoRun?: boolean;
+  /** A tab restored from the last run: no session until Connect or the first statement. */
+  boolLazyConnect?: boolean;
 }
 
 /** What the app menu and its shortcuts can ask of an editor tab. */
@@ -90,7 +96,7 @@ const runLabel = ({ result: objResult, error: objError }: StatementRun) => {
 };
 
 export function QueryWorkspace({
-  strTabId, objConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, onOpenObject,
+  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, onOpenObject,
 }: Props) {
   const refOnOpenObject = useRef(onOpenObject);
   refOnOpenObject.current = onOpenObject;
@@ -158,7 +164,7 @@ export function QueryWorkspace({
 
   // Connects when the tab opens (an auto-run tab connects with its first statement) and closes with it.
   useEffect(() => {
-    if (!boolAutoRun) connect();
+    if (!boolAutoRun && !boolLazyConnect) connect();
     return () => { api.closeSession(strSessionId).catch(() => {}); };
   }, [strSessionId]);
 
@@ -192,6 +198,8 @@ export function QueryWorkspace({
       fixedOverflowWidgets: true,
       renderLineHighlight: 'line',
       padding: { top: 8 },
+      // Alt + drag selects a column block (dbForge / Visual Studio); Ctrl + click adds a cursor.
+      multiCursorModifier: 'ctrlCmd',
     });
     objEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => refRun.current(false));
     objEditor.addCommand(monaco.KeyCode.F5, () => refRun.current(true));
@@ -220,7 +228,10 @@ export function QueryWorkspace({
         await refLoadMetadata.current(objConnection.id, false, objFound.loadSchema).catch(() => {});
         objFound = objectAt(objModel, objPosition);
       }
-      if (objFound && !('loadSchema' in objFound)) refOnOpenObject.current?.(objFound);
+      if (objFound && !('loadSchema' in objFound)) {
+        objEditor.setPosition(objPosition); // drops the cursor Ctrl + click just added
+        refOnOpenObject.current?.(objFound);
+      }
     };
     // F12 (and the right-click menu): the table, view or routine under the cursor opens in its own tab.
     objEditor.addAction({
@@ -421,6 +432,12 @@ export function QueryWorkspace({
     }
   };
 
+  const changeConnection = (strConnectionId: string) => {
+    if (strConnectionId === objConnection.id) return;
+    if (boolTxOpen && !confirm('This tab has an uncommitted transaction. Changing the connection rolls it back.\n\nChange anyway?')) return;
+    onChangeConnection(strTabId, strConnectionId);
+  };
+
   const format = () => {
     refEditor.current?.focus();
     refEditor.current?.trigger('toolbar', FORMAT_ACTION, null);
@@ -491,8 +508,8 @@ export function QueryWorkspace({
 
   return (
     <section className={`@container absolute inset-0 flex-col bg-panel ${boolActive ? 'flex' : 'hidden'}`}>
-      {/* toolbar: labels drop out as the tab gets narrower (container width, the sidebar can be resized) */}
-      <div className="flex h-10 shrink-0 items-center gap-1 overflow-hidden border-b border-line px-2"
+      {/* toolbar: labels drop out as the tab gets narrower (container width, the sidebar can be resized); what still does not fit wraps to a second row, nothing is cut off */}
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-line px-2 py-1"
         style={{ boxShadow: `inset 3px 0 0 ${envVar(objConnection.color)}` }}>
         {/* run */}
         <button className="btn btn-primary" onClick={() => execute(false)} disabled={boolRunning}
@@ -554,29 +571,40 @@ export function QueryWorkspace({
         </label>
 
         {/* session */}
-        <div className="ml-auto flex shrink-0 items-center gap-1 pl-2">
+        <div className="ml-auto flex min-w-0 items-center gap-1 pl-2">
+          {/* the connection this tab runs on */}
+          <label className="flex min-w-0 items-center gap-1.5" title="Connection of this tab. Changing it keeps the text and opens a new session.">
+            <span className="shrink-0"><KindIcon strKind={objConnection.kind} intSize={16} /></span>
+            {/* the one part of the toolbar that gives way when the tab is narrow */}
+            <select className="field h-[26px] w-auto min-w-[4.5rem] max-w-[13rem] shrink py-0 text-xs" aria-label="Connection" value={objConnection.id}
+              disabled={boolRunning} onChange={objEvent => changeConnection(objEvent.target.value)}>
+              {arrConnections.map(objItem => (
+                <option key={objItem.id} value={objItem.id}>{objItem.name} · {KIND_LABEL[objItem.kind]}</option>
+              ))}
+            </select>
+          </label>
           <span className="flex shrink-0 items-center gap-2 whitespace-nowrap px-1.5 text-xs text-muted"
             title={`${SESSION_LABEL[strSession]}: ${KIND_LABEL[objConnection.kind]} ${objConnection.username}@${objConnection.host}/${objConnection.database}`}>
             <span className="status-dot" data-state={strSession} />
-            <span className={`hidden @3xl:inline ${strSession === 'open' ? 'text-fg' : strSession === 'failed' ? 'text-danger' : ''}`}>
+            <span className={`hidden @[92rem]:inline ${strSession === 'open' ? 'text-fg' : strSession === 'failed' ? 'text-danger' : ''}`}>
               {SESSION_LABEL[strSession]}
             </span>
-            <span className="hidden @7xl:inline">{objConnection.username}@{objConnection.host}/{objConnection.database}</span>
+            <span className="hidden @[110rem]:inline">{objConnection.username}@{objConnection.host}/{objConnection.database}</span>
           </span>
           {strSession === 'open'
             ? (
-              <button className="icon-btn" onClick={disconnect} disabled={boolRunning} aria-label="Disconnect"
+              <button className="icon-btn shrink-0" onClick={disconnect} disabled={boolRunning} aria-label="Disconnect"
                 title="Disconnect: close this tab's database session">
-                <IconUnplug /> <span className="hidden @4xl:inline">Disconnect</span>
+                <IconUnplug /> <span className="hidden @[92rem]:inline">Disconnect</span>
               </button>
             )
             : (
-              <button className="icon-btn" onClick={connect} disabled={boolRunning || strSession === 'opening'} aria-label="Connect"
+              <button className="icon-btn shrink-0" onClick={connect} disabled={boolRunning || strSession === 'opening'} aria-label="Connect"
                 title="Connect: open this tab's database session">
-                <IconPlug /> <span className="hidden @4xl:inline">Connect</span>
+                <IconPlug /> <span className="hidden @[92rem]:inline">Connect</span>
               </button>
             )}
-          <button className="icon-btn" onClick={() => fetchMeta(true)} disabled={strMetaState === 'loading'}
+          <button className="icon-btn shrink-0" onClick={() => fetchMeta(true)} disabled={strMetaState === 'loading'}
             aria-label="Refresh schema"
             title={strMetaState === 'loading'
               ? 'Loading schema…'

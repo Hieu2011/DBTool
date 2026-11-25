@@ -10,6 +10,7 @@ export function CodeView({ strText, strLanguage }: { strText: string; strLanguag
     const objEditor = monaco.editor.create(refHost.current!, {
       model: objModel,
       readOnly: true,
+      multiCursorModifier: 'ctrlCmd', // Alt + drag = column block
       automaticLayout: true,
       minimap: { enabled: false },
       fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',

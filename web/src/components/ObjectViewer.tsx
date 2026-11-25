@@ -63,6 +63,7 @@ function DdlView({ strDdl, strLanguage }: { strDdl: string; strLanguage: string 
     const objEditor = monaco.editor.create(refHost.current!, {
       model: objModel,
       readOnly: true,
+      multiCursorModifier: 'ctrlCmd', // Alt + drag = column block
       automaticLayout: true,
       minimap: { enabled: false },
       fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
