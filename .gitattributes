@@ -1,0 +1,2 @@
+# sh would choke on CRLF: the hook stays LF whatever core.autocrlf says
+scripts/hooks/* text eol=lf
