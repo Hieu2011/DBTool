@@ -73,7 +73,8 @@ internal sealed partial class UpdateService
     /// <summary>The published single-file exe. Null for a debug / dotnet run build: nothing to replace there.</summary>
     private static string? ExePath =>
         Environment.ProcessPath is { } strPath
-        && string.Equals(Path.GetFileName(strPath), "DbStudio.exe", StringComparison.OrdinalIgnoreCase)
+        // Any file name: the exe downloaded from the update folder is called DbStudio-<version>.exe.
+        && string.Equals(Path.GetExtension(strPath), ".exe", StringComparison.OrdinalIgnoreCase)
         && string.IsNullOrEmpty(typeof(UpdateService).Assembly.Location)
             ? strPath
             : null;

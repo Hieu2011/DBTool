@@ -176,6 +176,9 @@ export function UpdateDialog({ strUnsaved, onClose }: Props) {
                 <IconDownload intSize={14} /> {strBusy === 'apply' ? 'Updating…' : 'Update and restart'}
               </button>
             </div>
+            {objConfig && !objConfig.canApply && (
+              <p className="mt-2 text-danger">This copy cannot replace itself (it is not the published single-file exe). Download the new exe from the update folder instead.</p>
+            )}
             {objInfo.notes && <p className="mt-2 whitespace-pre-wrap border-t border-line/60 pt-2 text-fg" style={{ userSelect: 'text' }}>{objInfo.notes}</p>}
             {strBusy === 'apply' && (
               <div className="mt-2.5" role="status">
