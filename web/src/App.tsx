@@ -18,7 +18,7 @@ import { SnippetsDialog } from './components/SnippetsDialog';
 import { UpdateDialog } from './components/UpdateDialog';
 import { showToast } from './toast';
 import { getSnippets, setSnippets } from './sql/snippets';
-import { IconClose, IconHistory, IconPlay, IconPlus, IconSidebar, IconSqlFile, IconTable } from './components/icons';
+import { IconCheck, IconClose, IconHistory, IconPlay, IconPlus, IconSidebar, IconSqlFile, IconTable } from './components/icons';
 
 /** A connection can have several tabs: editors (each with its own DB session) and object viewers. */
 type AppTab =
@@ -62,6 +62,9 @@ export default function App() {
 
   const [intSidebarWidth, setIntSidebarWidth] = useState(SIDEBAR_DEFAULT);
   const [boolSidebarOpen, setBoolSidebarOpen] = useState(true);
+  // Long lines of the editors continue on the next row instead of scrolling sideways.
+  const [boolWordWrap, setBoolWordWrap] = useState(true);
+  const toggleWordWrap = useCallback(() => setBoolWordWrap(boolPrev => !boolPrev), []);
   const [boolHistory, setBoolHistory] = useState(false);
   const [boolSnippets, setBoolSnippets] = useState(false);
   const [boolUpdate, setBoolUpdate] = useState(false);
@@ -83,15 +86,16 @@ export default function App() {
       const intWidth = Number(dicSettings.sidebarWidth);
       if (Number.isFinite(intWidth) && intWidth >= SIDEBAR_MIN && intWidth <= SIDEBAR_MAX) setIntSidebarWidth(intWidth);
       if (typeof dicSettings.sidebarOpen === 'boolean') setBoolSidebarOpen(dicSettings.sidebarOpen);
+      if (typeof dicSettings.wordWrap === 'boolean') setBoolWordWrap(dicSettings.wordWrap);
     }).catch(() => {}).finally(() => { refSettingsLoaded.current = true; });
   }, []);
   useEffect(() => {
     if (!refSettingsLoaded.current) return;
     const intTimer = setTimeout(() => {
-      api.saveSettings({ sidebarWidth: intSidebarWidth, sidebarOpen: boolSidebarOpen }).catch(() => {});
+      api.saveSettings({ sidebarWidth: intSidebarWidth, sidebarOpen: boolSidebarOpen, wordWrap: boolWordWrap }).catch(() => {});
     }, 400);
     return () => clearTimeout(intTimer);
-  }, [intSidebarWidth, boolSidebarOpen]);
+  }, [intSidebarWidth, boolSidebarOpen, boolWordWrap]);
 
   // App shortcuts (Ctrl+B sidebar, Ctrl+N / O / S / W for the File menu). Capture phase: the editor must not eat them.
   useEffect(() => {
@@ -434,6 +438,8 @@ export default function App() {
         { label: boolSidebarOpen ? 'Hide sidebar' : 'Show sidebar', hint: 'Ctrl+B', icon: <IconSidebar intSize={14} />,
           onSelect: () => setBoolSidebarOpen(boolPrev => !boolPrev) },
         { label: 'Reset sidebar width', onSelect: () => setIntSidebarWidth(SIDEBAR_DEFAULT) },
+        { kind: 'separator' },
+        { label: 'Word wrap', hint: 'Alt+Z', icon: boolWordWrap ? <IconCheck intSize={14} /> : undefined, onSelect: toggleWordWrap },
       ],
     },
     {
@@ -653,6 +659,8 @@ export default function App() {
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 strInitialSql={objTab.initialSql}
                 boolAutoRun={objTab.autoRun}
+                boolWordWrap={boolWordWrap}
+                onToggleWordWrap={toggleWordWrap}
                 boolLazyConnect={objTab.restored && objTab.id !== strActiveTabId}
               />
             )))}

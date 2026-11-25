@@ -50,6 +50,9 @@ interface Props {
   boolAutoRun?: boolean;
   /** A tab restored from the last run: no session until Connect or the first statement. */
   boolLazyConnect?: boolean;
+  /** Long lines wrap inside the editor (View > Word wrap, Alt+Z); kept in the app settings. */
+  boolWordWrap: boolean;
+  onToggleWordWrap: () => void;
 }
 
 /** What the app menu and its shortcuts can ask of an editor tab. */
@@ -96,8 +99,10 @@ const runLabel = ({ result: objResult, error: objError }: StatementRun) => {
 };
 
 export function QueryWorkspace({
-  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, onOpenObject,
+  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, boolWordWrap, onToggleWordWrap, onOpenObject,
 }: Props) {
+  const refOnToggleWordWrap = useRef(onToggleWordWrap);
+  refOnToggleWordWrap.current = onToggleWordWrap;
   const refOnOpenObject = useRef(onOpenObject);
   refOnOpenObject.current = onOpenObject;
   const refLoadMetadata = useRef(loadMetadata);
@@ -200,7 +205,35 @@ export function QueryWorkspace({
       padding: { top: 8 },
       // Alt + drag selects a column block (dbForge / Visual Studio); Ctrl + click adds a cursor.
       multiCursorModifier: 'ctrlCmd',
+      wordWrap: boolWordWrap ? 'on' : 'off',
+      wrappingIndent: 'same',
     });
+    // Alt + click adds a cursor where it lands (Alt + drag stays the column block). Monaco moves the only cursor there
+    // on the press, so the cursors are remembered just before it (capture phase) and put back on the release.
+    let objAltPress: { x: number; y: number; selections: Monaco.Selection[] } | null = null;
+    const onAltPress = (objEvent: PointerEvent) => {
+      objAltPress = objEvent.altKey && !objEvent.ctrlKey && !objEvent.shiftKey && !objEvent.metaKey && objEvent.button === 0
+        ? { x: objEvent.pageX, y: objEvent.pageY, selections: objEditor.getSelections() ?? [] }
+        : null;
+    };
+    const elHost = refHost.current!;
+    elHost.addEventListener('pointerdown', onAltPress, true);
+    objEditor.onMouseUp(objEvent => {
+      const objPress = objAltPress;
+      objAltPress = null;
+      const objAt = objEvent.target.position;
+      if (!objPress || !objAt || objEvent.target.type !== monaco.editor.MouseTargetType.CONTENT_TEXT &&
+        objEvent.target.type !== monaco.editor.MouseTargetType.CONTENT_EMPTY) return;
+      // Moved while pressed: that was a column block, leave it alone.
+      if (Math.abs(objEvent.event.posx - objPress.x) > 3 || Math.abs(objEvent.event.posy - objPress.y) > 3) return;
+      // A second Alt + click on a cursor takes it away again (never the last one).
+      const arrKept = objPress.selections.filter(objItem => !(objItem.isEmpty() && objItem.getPosition().equals(objAt)));
+      if (arrKept.length === 0) return;
+      const boolRemove = arrKept.length < objPress.selections.length;
+      objEditor.setSelections(boolRemove ? arrKept : [...arrKept, new monaco.Selection(objAt.lineNumber, objAt.column, objAt.lineNumber, objAt.column)]);
+    });
+    // Alt+Z is Monaco's own toggle, but for one editor only: here it switches every tab and is remembered.
+    objEditor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => refOnToggleWordWrap.current());
     objEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => refRun.current(false));
     objEditor.addCommand(monaco.KeyCode.F5, () => refRun.current(true));
     // Formats the selection, or the whole editor. One edit, so one Ctrl+Z brings the text back.
@@ -310,6 +343,7 @@ export function QueryWorkspace({
       fnUnregister();
       fnForgetRoutines();
       fnForgetLoader();
+      elHost.removeEventListener('pointerdown', onAltPress, true);
       objEditor.dispose();
       objModel.dispose();
     };
@@ -318,6 +352,10 @@ export function QueryWorkspace({
   useEffect(() => {
     if (boolActive) refEditor.current?.focus();
   }, [boolActive]);
+
+  useEffect(() => {
+    refEditor.current?.updateOptions({ wordWrap: boolWordWrap ? 'on' : 'off' });
+  }, [boolWordWrap]);
 
   // ---- metadata (loaded once per connection, refreshed on demand) ----
   const fetchMeta = useCallback(async (boolRefresh: boolean) => {

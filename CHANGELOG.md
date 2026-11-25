@@ -2,6 +2,11 @@
 
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
+## 1.1.5 — 2026-11-25
+
+- Editor tự xuống hàng khi dòng dài hơn khung (View → Word wrap hoặc Alt+Z để tắt / bật, nhớ qua lần tắt app)
+- Alt + click thêm một con trỏ tại chỗ bấm, bấm lại vào con trỏ đó để bỏ (Alt + kéo vẫn là chọn khối cột)
+
 ## 1.1.4 — 2026-11-25
 
 - Gợi ý tự bật lại sau mỗi lần gõ hoặc xoá (gõ sai, xoá đi gõ lại không cần Ctrl+Space nữa)
