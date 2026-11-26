@@ -8,6 +8,7 @@
 # Without that file the environment variables DBSTUDIO_CLOUD_URL / _USER / _APP_PASSWORD / _FOLDER are used.
 param(
     [switch]$SaveCredential,   # ask for the cloud account and save it, then stop
+    [switch]$SaveStatsLink,    # ask for the upload-only share the apps report to (who uses DbStudio), then stop
     [string]$Version,      # e.g. 1.2.0: written into the project first. Omitted: the project's current version
     [string]$Notes = '',   # shown by Help > Check for updates. Omitted: the version's entry in CHANGELOG.md
     [switch]$SkipBuild,    # upload what is already in .\dist
@@ -27,8 +28,24 @@ if ($SaveCredential) {
     if (-not $credential) { throw 'Cancelled.' }
     New-Item -ItemType Directory -Force (Split-Path $saved) | Out-Null
     # Export-Clixml encrypts the password with DPAPI: only this Windows account on this PC can read it back.
-    @{ Url = $url; Folder = $(if ($dir) { $dir } else { 'DBTool' }); Credential = $credential } | Export-Clixml $saved
+    $new = @{ Url = $url; Folder = $(if ($dir) { $dir } else { 'DBTool' }); Credential = $credential }
+    # The stats link (-SaveStatsLink) survives a new account.
+    if (Test-Path $saved) { $old = Import-Clixml $saved; if ($old.Stats) { $new.Stats = $old.Stats; $new.StatsFolder = $old.StatsFolder } }
+    $new | Export-Clixml $saved
     Write-Host "Saved to $saved" -ForegroundColor Green
+    return
+}
+
+if ($SaveStatsLink) {
+    if (-not (Test-Path $saved)) { throw 'Run .\scripts\release.ps1 -SaveCredential first.' }
+    $config = Import-Clixml $saved
+    $link = (Read-Host 'Share link of the upload-only (file drop) folder; give it the same password as the update link (empty = stop reporting)').Trim()
+    if ($link -and $link -notlike 'https://*') { throw 'The link must start with https://' }
+    $name = if ($link) { (Read-Host 'Name of that folder in your cloud [DBTool-Users]').Trim('/', ' ') } else { '' }
+    $config.Stats = $link
+    $config.StatsFolder = $(if ($name) { $name } else { 'DBTool-Users' })
+    $config | Export-Clixml $saved
+    Write-Host "Saved. The link goes into version.json at the next release." -ForegroundColor Green
     return
 }
 
@@ -105,7 +122,10 @@ Invoke-WebRequest -Uri "$folderUrl/$exeName" -Method Put -InFile $exe -Headers $
 $uploaded = [long](Invoke-WebRequest -Uri "$folderUrl/$exeName" -Method Head -Headers $headers -UseBasicParsing).Headers['Content-Length']
 if ($uploaded -ne $size) { throw "The upload is incomplete ($uploaded of $size bytes). version.json was not changed, so nobody gets a broken update." }
 
-$cloudManifest = [ordered]@{ version = $manifest.version; file = $exeName; sha256 = $manifest.sha256; date = $manifest.date; notes = $manifest.notes } | ConvertTo-Json
+$cloudManifest = [ordered]@{ version = $manifest.version; file = $exeName; sha256 = $manifest.sha256; date = $manifest.date; notes = $manifest.notes }
+# The upload-only share the apps report to; a setting of this machine, like the account.
+if ((Test-Path $saved) -and $config.Stats) { $cloudManifest.stats = $config.Stats }
+$cloudManifest = $cloudManifest | ConvertTo-Json
 Invoke-WebRequest -Uri "$folderUrl/version.json" -Method Put -Body ([Text.Encoding]::UTF8.GetBytes($cloudManifest)) -Headers $headers -ContentType 'application/json' -UseBasicParsing | Out-Null
 
 # CHANGELOG.md keeps what version.json forgets at the next release. One entry per version: an existing one is left alone.

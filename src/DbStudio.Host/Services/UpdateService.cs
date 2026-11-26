@@ -28,7 +28,7 @@ internal sealed class UpdateException(string strMessage, string? strCode = null)
 
 /// <summary>
 /// Self-update from a public share link of a Nextcloud / ownCloud folder (https://host/index.php/s/TOKEN) that holds
-/// version.json ({ "version", "file", "sha256", "date", "notes" }) and the exe. The link is a setting, never part of the code;
+/// version.json ({ "version", "file", "sha256", "date", "notes", "stats" }) and the exe. The link is a setting, never part of the code;
 /// its password is kept with DPAPI in %APPDATA%\DbStudio\update.json. Nothing is checked or downloaded unless asked.
 /// </summary>
 internal sealed partial class UpdateService
@@ -40,7 +40,7 @@ internal sealed partial class UpdateService
     private static readonly HttpClient Http = CreateClient();
 
     private sealed record Stored(string? Url, string? ProtectedPassword);
-    private sealed record Manifest(string? Version, string? File, string? Sha256, string? Notes, string? Date);
+    private sealed record Manifest(string? Version, string? File, string? Sha256, string? Notes, string? Date, string? Stats);
 
     private readonly string _strFile;
     private readonly object _objLock = new();
@@ -106,6 +106,7 @@ internal sealed partial class UpdateService
     {
         var (objManifest, objLatest) = await ReadManifestAsync(objCancelToken).ConfigureAwait(false);
         var objCurrent = typeof(UpdateService).Assembly.GetName().Version ?? new Version(0, 0, 0);
+        ReportUsage(objManifest.Stats);
         return new UpdateInfo(CurrentVersion, Display(objLatest), Normalize(objLatest) > Normalize(objCurrent), objManifest.Notes,
             DateOnly.TryParseExact(objManifest.Date, "yyyy-MM-dd", out var dtReleased) ? dtReleased.ToString("yyyy-MM-dd") : null);
     }

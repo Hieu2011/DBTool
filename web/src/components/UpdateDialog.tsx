@@ -137,6 +137,9 @@ export function UpdateDialog({ strUnsaved, onClose }: Props) {
           <p className="col-span-2 text-[11px] leading-snug text-muted">
             The public share link of the folder that holds DbStudio.exe and version.json. Nothing is downloaded until you press Update.
           </p>
+          <p className="col-span-2 text-[11px] leading-snug text-muted">
+            To count who uses DbStudio, a check also reports this computer once a day to the update server: Windows user name, computer name, IP address and version.
+          </p>
           <div className="col-span-2 flex justify-end">
             <button type="submit" className="btn shrink-0 whitespace-nowrap" disabled={!objConfig || strBusy !== null || strUrl.trim() === ''}>
               <IconRefresh intSize={14} /> {strBusy === 'check' ? 'Checking…' : 'Check for updates'}
