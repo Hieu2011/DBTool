@@ -69,11 +69,15 @@ interface Props {
 export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsRows, onRows, objReveal, objCommand, boolNoExport, onBlock }: Props) {
   // A block of cells: from the cell where the drag / Shift started (a) to where it is now (b). Rows by their index in objResult.rows.
   const [objBlock, setObjBlock] = useState<{ a: { r: number; c: number }; b: { r: number; c: number } } | null>(null);
+  // Blocks added with Ctrl (DBeaver's way): they stay while another one is dragged.
+  const [arrExtra, setArrExtra] = useState<{ a: { r: number; c: number }; b: { r: number; c: number } }[]>([]);
+  const clearBlocks = () => { setObjBlock(null); setArrExtra(arrPrev => (arrPrev.length === 0 ? arrPrev : [])); };
   const refDrag = useRef<{ r: number; c: number } | null>(null);
+  const refRowDrag = useRef<number | null>(null); // the row number where a drag down the number column started
   const refOnBlock = useRef(onBlock);
   refOnBlock.current = onBlock;
   useEffect(() => {
-    const endDrag = () => { refDrag.current = null; };
+    const endDrag = () => { refDrag.current = null; refRowDrag.current = null; };
     window.addEventListener('mouseup', endDrag);
     return () => window.removeEventListener('mouseup', endDrag);
   }, []);
@@ -136,21 +140,25 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     return arrIndexes;
   }, [objResult, arrNumeric, objSort, boolFilters, dicFilters, intBase]);
 
-  // The block as shown: the rows between its two ends in the current order.
+  // The blocks as shown: for each, the rows between its two ends in the current order. With Ctrl blocks around, the current cell is one too.
+  const arrAreas = useMemo(() => {
+    const arrBlocks = [...arrExtra, ...(objBlock ? [objBlock] : arrExtra.length > 0 && objSelected ? [{ a: objSelected, b: objSelected }] : [])];
+    return arrBlocks.flatMap(objItem => {
+      const intA = arrView.indexOf(objItem.a.r);
+      const intB = arrView.indexOf(objItem.b.r);
+      if (intA < 0 || intB < 0) return [];
+      return [{ hsRows: new Set(arrView.slice(Math.min(intA, intB), Math.max(intA, intB) + 1)), first: Math.min(objItem.a.c, objItem.b.c), last: Math.max(objItem.a.c, objItem.b.c) }];
+    });
+  }, [arrExtra, objBlock, objSelected, arrView]);
+  const inBlock = (intRow: number, intCol: number) => arrAreas.some(objItem => objItem.hsRows.has(intRow) && intCol >= objItem.first && intCol <= objItem.last);
+  // Everything selected, as rows (in the order shown) and columns (left to right).
   const objArea = useMemo(() => {
-    if (!objBlock) return null;
-    const intA = arrView.indexOf(objBlock.a.r);
-    const intB = arrView.indexOf(objBlock.b.r);
-    if (intA < 0 || intB < 0) return null;
-    const arrRows = arrView.slice(Math.min(intA, intB), Math.max(intA, intB) + 1);
-    const intFirst = Math.min(objBlock.a.c, objBlock.b.c);
-    const intLast = Math.max(objBlock.a.c, objBlock.b.c);
-    return { rows: arrRows, hsRows: new Set(arrRows), first: intFirst, last: intLast };
-  }, [objBlock, arrView]);
-  useEffect(() => {
-    refOnBlock.current?.(objArea ? { rows: objArea.rows, cols: Array.from({ length: objArea.last - objArea.first + 1 }, (_, intAt) => objArea.first + intAt) } : null);
-  }, [objArea]);
-  const inBlock = (intRow: number, intCol: number) => !!objArea && objArea.hsRows.has(intRow) && intCol >= objArea.first && intCol <= objArea.last;
+    if (arrAreas.length === 0) return null;
+    const hsCols = new Set<number>();
+    for (const objItem of arrAreas) for (let intCol = objItem.first; intCol <= objItem.last; intCol++) hsCols.add(intCol);
+    return { rows: arrView.filter(intRow => arrAreas.some(objItem => objItem.hsRows.has(intRow))), cols: [...hsCols].sort((intA, intB) => intA - intB) };
+  }, [arrAreas, arrView]);
+  useEffect(() => { refOnBlock.current?.(objArea); }, [objArea]);
 
   const intTotalWidth = INDEX_W + arrWidths.reduce((intSum, intWidth) => intSum + intWidth, 0);
   const boolFiltered = arrView.length !== objResult.rows.length;
@@ -251,18 +259,52 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     if (hsPicked.size > 0) selectRows(new Set());
   };
 
+  /**
+   * Ctrl+V: tab-separated lines (what Ctrl+C gives, or cells from Excel) written into the cells that can be edited.
+   * Starts at the first selected row's first column, else at the current cell; one copied line fills every selected row.
+   * Nothing reaches the database before Save.
+   */
+  const onPaste = async (objEvent: React.ClipboardEvent) => {
+    if (objEvent.target instanceof HTMLInputElement || !objEdit) return; // a cell or filter box pastes its own text
+    const strText = objEvent.clipboardData.getData('text/plain');
+    if (!strText) return;
+    objEvent.preventDefault();
+    const arrLines = strText.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n').map(strLine => strLine.split('\t'));
+    const arrPickedRows = arrView.filter(intRow => hsPicked.has(intRow));
+    const intFirstRow = arrPickedRows[0] ?? objSelected?.r;
+    const intFirstCol = arrPickedRows.length > 0 ? 0 : objSelected?.c ?? 0;
+    const intAt = intFirstRow === undefined ? -1 : arrView.indexOf(intFirstRow);
+    if (intAt < 0) return;
+    const arrTargets = arrLines.length === 1 && arrPickedRows.length > 1
+      ? arrPickedRows.map(intRow => ({ intRow, arrLine: arrLines[0] }))
+      : arrLines.flatMap((arrLine, intLine) => (arrView[intAt + intLine] === undefined ? [] : [{ intRow: arrView[intAt + intLine], arrLine }]));
+    for (const { intRow, arrLine } of arrTargets) {
+      if (!objEdit.canEdit(intRow) || (objEdit.start && !(await objEdit.start(intRow)))) continue;
+      arrLine.forEach((strCell, intOffset) => {
+        const intCol = intFirstCol + intOffset;
+        if (intCol >= objResult.columns.length || !objEdit.arrEditable[intCol]) return;
+        const strValue = strCell === '' ? null : strCell;
+        // A loaded row: pasting what it already holds is not a change.
+        const objOriginal = objResult.rows[intRow]?.[intCol];
+        const boolSame = intRow < intBase && (strValue === null ? objOriginal === null || objOriginal === undefined : objOriginal !== null && objOriginal !== undefined && display(objOriginal) === strValue);
+        objEdit.onEdit(intRow, intCol, boolSame ? undefined : strValue);
+      });
+    }
+  };
+
   const onKey = (objEvent: React.KeyboardEvent) => {
     if (objEvent.target instanceof HTMLInputElement) return; // filter and cell boxes handle their own keys
     if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'a') {
-      setObjBlock(null);
+      clearBlocks();
       selectRows(new Set(arrView));
       return objEvent.preventDefault();
     }
     if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'c') {
       // A block: its cells. Several rows: tab-separated lines. Else the cell.
       const strText = objArea
-        ? objArea.rows.map(intRow => Array.from({ length: objArea.last - objArea.first + 1 }, (_, intAt) => display(valueAt(intRow, objArea.first + intAt))).join('\t')).join('\n')
-        : hsPicked.size > 1
+        // only the cells that are selected: blocks picked with Ctrl need not line up
+        ? objArea.rows.map(intRow => objArea.cols.filter(intCol => inBlock(intRow, intCol)).map(intCol => display(valueAt(intRow, intCol))).join('\t')).join('\n')
+        : hsPicked.size > 0
         ? arrView.filter(intRow => hsPicked.has(intRow)).map(intRow => objResult.columns.map((_, intCol) => display(valueAt(intRow, intCol))).join('\t')).join('\n')
         : objSelected ? display(valueAt(objSelected.r, objSelected.c)) : null;
       if (strText === null) return;
@@ -290,7 +332,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
       if (arrStep[0] !== 0) objVirtual.scrollToIndex(intEndView);
       return;
     }
-    setObjBlock(null);
+    clearBlocks();
     const intView = Math.min(Math.max(intAt + arrStep[0], 0), arrView.length - 1);
     const intCol = Math.min(Math.max(objSelected.c + arrStep[1], 0), objResult.columns.length - 1);
     const intRow = arrView[intView];
@@ -317,7 +359,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     setObjSort(objPrev => (objPrev?.col !== intCol ? { col: intCol, desc: false } : objPrev.desc ? null : { col: intCol, desc: true }));
 
   return (
-    <div ref={refScroller} tabIndex={0} onKeyDown={onKey}
+    <div ref={refScroller} tabIndex={0} onKeyDown={onKey} onPaste={onPaste}
       className="h-full overflow-auto font-mono text-[13px] outline-none">
       <div style={{ width: intTotalWidth, minWidth: '100%' }}>
         {/* header */}
@@ -395,8 +437,18 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                 className={`absolute left-0 flex w-full border-b border-line/60 ${
                   boolDeleted ? 'bg-danger/15 line-through' : boolNew ? 'bg-success/15' : boolPicked ? 'bg-accent/25 shadow-[inset_0_1px_0_var(--accent),inset_0_-1px_0_var(--accent)]' : 'hover:bg-hover/60'}`}
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)` }}>
-                <div style={{ width: INDEX_W }} onClick={objEvent => { setObjBlock(null); setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
-                  title={boolDeleted ? 'Will be deleted on Save' : boolNew ? 'New row, inserted on Save' : 'Click to select the row (Ctrl / Shift for several)'}
+                <div style={{ width: INDEX_W }}
+                  // Dragging down the numbers selects the rows from where the button went down.
+                  onMouseDown={objEvent => { if (objEvent.button === 0 && !objEvent.ctrlKey && !objEvent.shiftKey) refRowDrag.current = intRow; }}
+                  onMouseEnter={objEvent => {
+                    const intFrom = refRowDrag.current === null ? -1 : arrView.indexOf(refRowDrag.current);
+                    if (intFrom < 0 || !(objEvent.buttons & 1) || refRowDrag.current === intRow && hsPicked.size <= 1) return;
+                    clearBlocks();
+                    refAnchor.current = refRowDrag.current;
+                    selectRows(new Set(arrView.slice(Math.min(intFrom, objItem.index), Math.max(intFrom, objItem.index) + 1)));
+                  }}
+                  onClick={objEvent => { clearBlocks(); setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
+                  title={boolDeleted ? 'Will be deleted on Save' : boolNew ? 'New row, inserted on Save' : 'Click to select the row (drag, Ctrl or Shift for several); Ctrl+C copies, Ctrl+V pastes'}
                   className={`shrink-0 cursor-pointer border-r border-line px-2 text-right leading-7 ${
                     boolDeleted ? 'font-semibold text-danger' : boolNew ? 'font-semibold text-success' : boolPicked ? 'bg-accent font-semibold text-accent-fg' : 'text-muted'}`}>
                   {boolDeleted ? '−' : boolNew ? '+' : objItem.index + 1}
@@ -439,9 +491,20 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                   return (
                     <div key={intCol} style={{ width: arrWidths[intCol] }} data-cell={strCell}
                       onMouseDown={objEvent => {
-                        if (objEvent.button !== 0 || objEvent.ctrlKey || objEvent.shiftKey) return;
+                        if (objEvent.button !== 0 || objEvent.shiftKey) return;
+                        if (objEvent.ctrlKey) {
+                          // Ctrl: what is selected stays, and a new block starts at this cell.
+                          const objKeep = objBlock ?? (objSelected ? { a: objSelected, b: objSelected } : null);
+                          if (objKeep) setArrExtra(arrPrev => [...arrPrev, objKeep]);
+                          setObjBlock(null);
+                          setObjSelected({ r: intRow, c: intCol });
+                          if (hsPicked.size > 0) selectRows(new Set());
+                          onSelectRow?.(intRow);
+                          refDrag.current = { r: intRow, c: intCol };
+                          return;
+                        }
                         refDrag.current = { r: intRow, c: intCol };
-                        setObjBlock(null);
+                        clearBlocks();
                       }}
                       // Dragging over other cells stretches a block from the cell where the button went down.
                       onMouseEnter={objEvent => {
@@ -452,13 +515,14 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                       }}
                       onClick={objEvent => {
                         // Shift + click: the block from the current cell to this one.
-                        if (objEvent.shiftKey && !objEvent.ctrlKey && objSelected) return blockTo(intRow, intCol);
+                        if (objEvent.ctrlKey) return; // the press already added this cell to the selection
+                        if (objEvent.shiftKey && objSelected) return blockTo(intRow, intCol);
                         setObjSelected({ r: intRow, c: intCol }); pickCell(intRow, objEvent); onSelectRow?.(intRow);
                       }}
                       // Right-click outside what is selected moves the selection there first.
                       onContextMenu={() => {
                         if (inBlock(intRow, intCol) || hsPicked.has(intRow)) return;
-                        setObjBlock(null);
+                        clearBlocks();
                         setObjSelected({ r: intRow, c: intCol });
                         if (hsPicked.size > 0) selectRows(new Set());
                         onSelectRow?.(intRow);

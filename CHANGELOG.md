@@ -3,6 +3,12 @@
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
 
+## 1.1.9 — 2026-11-26
+
+- Lưới kết quả: giữ Ctrl để chọn thêm nhiều vùng ô rời nhau, Ctrl+C chép tất cả
+- Lưới kết quả: kéo chuột ở cột số dòng để chọn nhiều dòng; chọn một dòng rồi Ctrl+C chép cả dòng
+- Lưới kết quả: Ctrl+V dán dòng / vùng ô đã copy (kể cả từ Excel) vào các ô sửa được, ví dụ dán vào dòng mới; bấm Save mới ghi
+
 ## 1.1.8 — 2026-11-26
 
 - Lưới kết quả: chuột phải → Generate script as → INSERT / WHERE IN () / WHERE AND OR / UPDATE, ra tab SQL, file hoặc clipboard (UPDATE tìm theo khoá chính)
