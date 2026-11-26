@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import type { Connection, DbObjectInfo, SchemaMetadata, Workspace } from './types';
 import { ConnectionList } from './components/ConnectionList';
 import { Toaster } from './components/Toaster';
 import { ConnectionDialog, type DialogState } from './components/ConnectionDialog';
-import { FORMAT_ACTION, QueryWorkspace, type EditorHandle } from './components/QueryWorkspace';
+import { FORMAT_ACTION, QueryWorkspace, type EditorHandle, type SessionState } from './components/QueryWorkspace';
+import type { TreeStatus } from './components/useOuterScroll';
 import { MenuBar, type MenuDef } from './components/MenuBar';
 import { ApiError } from './api';
 import { ObjectTree } from './components/ObjectTree';
@@ -57,6 +58,31 @@ export default function App() {
   const refEditors = useRef(new Map<string, EditorHandle>());
   // Tabs edited since they were opened / saved.
   const [hsDirty, setHsDirty] = useState<Set<string>>(new Set());
+  // Object tabs whose Source was edited and not compiled yet.
+  const [hsSourceDirty, setHsSourceDirty] = useState<Set<string>>(new Set());
+  const markSource = useCallback((strTabId: string, boolDirty: boolean) => {
+    setHsSourceDirty(hsPrev => {
+      if (hsPrev.has(strTabId) === boolDirty) return hsPrev;
+      const hsNext = new Set(hsPrev);
+      if (boolDirty) hsNext.add(strTabId); else hsNext.delete(strTabId);
+      return hsNext;
+    });
+  }, []);
+  // Tabs are reordered by dragging: the tab being dragged, and where it would land.
+  const refDragTab = useRef<string | null>(null);
+  const [objDropTab, setObjDropTab] = useState<{ id: string; after: boolean } | null>(null);
+  const moveTab = (strId: string, strTargetId: string, boolAfter: boolean) => setArrTabs(arrPrev => {
+    const objMoved = arrPrev.find(objTab => objTab.id === strId);
+    if (!objMoved || strId === strTargetId) return arrPrev;
+    const arrNext = arrPrev.filter(objTab => objTab.id !== strId);
+    const intTarget = arrNext.findIndex(objTab => objTab.id === strTargetId);
+    if (intTarget < 0) return arrPrev;
+    arrNext.splice(intTarget + (boolAfter ? 1 : 0), 0, objMoved);
+    return arrNext;
+  });
+
+  /** Closing this tab loses work: a changed file, or routine code not saved to the database. */
+  const isUnsaved = (objTab: AppTab) => (objTab.kind === 'query' ? !!objTab.filePath && hsDirty.has(objTab.id) : hsSourceDirty.has(objTab.id));
   // What the global shortcuts call: replaced on every render so they see current state.
   const refShortcuts = useRef<Record<string, () => void>>({});
 
@@ -106,6 +132,8 @@ export default function App() {
       if (!fnAction) return;
       // Find / Replace inside an editor is Monaco's own business (also the read-only DDL / Source views).
       if ((strKey === 'f' || strKey === 'h') && (objEvent.target as Element | null)?.closest?.('.monaco-editor')) return;
+      // Ctrl+S in a routine's Source editor compiles it.
+      if (strKey === 's' && (objEvent.target as Element | null)?.closest?.('[data-source-editor]')) return;
       objEvent.preventDefault();
       objEvent.stopPropagation();
       fnAction();
@@ -257,13 +285,13 @@ export default function App() {
   const closeTab = (objTab: AppTab) => {
     if (refTxTabIds.current.has(objTab.id) &&
       !confirm('This tab has an uncommitted transaction. Closing it rolls the transaction back.\n\nClose anyway?')) return;
-    if (objTab.kind === 'query' && objTab.filePath && hsDirty.has(objTab.id) &&
-      !confirm(`${objTab.title} has changes that are not saved.\n\nClose without saving?`)) return;
+    if (isUnsaved(objTab) &&
+      !confirm(`${objTab.kind === 'query' ? objTab.title : objTab.object.name} has changes that are not saved.\n\nClose without saving?`)) return;
     closeTabs([objTab]);
   };
 
   const closeAllTabs = () => {
-    const boolUnsaved = arrTabs.some(objTab => objTab.kind === 'query' && objTab.filePath && hsDirty.has(objTab.id));
+    const boolUnsaved = arrTabs.some(isUnsaved);
     const boolTransaction = arrTabs.some(objTab => refTxTabIds.current.has(objTab.id));
     if ((boolUnsaved || boolTransaction) &&
       !confirm(`Some tabs have ${boolUnsaved ? 'unsaved changes' : ''}${boolUnsaved && boolTransaction ? ' or ' : ''}${
@@ -345,6 +373,49 @@ export default function App() {
     dicLoads.set(strLoadKey, objLoad);
     return objLoad;
   }, []);
+
+  // ---- disconnect a connection: its tabs close their sessions, the sidebar folds it and forgets its tree ----
+  const [dicDisconnect, setDicDisconnect] = useState<Record<string, number>>({});
+  const [objLink, setObjLink] = useState<{ id: string; connected: boolean; serial: number } | null>(null);
+  const disconnectConnection = useCallback((strConnectionId: string) => {
+    const boolTransaction = refSession.current.arrTabs.some(objTab => objTab.connectionId === strConnectionId && refTxTabIds.current.has(objTab.id));
+    if (boolTransaction && !confirm('A tab of this connection has an uncommitted transaction. Disconnecting rolls it back.\n\nDisconnect anyway?')) return;
+    setDicDisconnect(dicPrev => ({ ...dicPrev, [strConnectionId]: (dicPrev[strConnectionId] ?? 0) + 1 }));
+    // The cached schema goes too: with it the tree would still look connected.
+    setDicMetadata(dicPrev => ({ ...dicPrev, [strConnectionId]: undefined }));
+    setObjLink(objPrev => ({ id: strConnectionId, connected: false, serial: (objPrev?.serial ?? 0) + 1 }));
+  }, []);
+  const markConnected = useCallback((strConnectionId: string) => {
+    setObjLink(objPrev => (objPrev?.id === strConnectionId && objPrev.connected ? objPrev : { id: strConnectionId, connected: true, serial: (objPrev?.serial ?? 0) + 1 }));
+  }, []);
+
+  // Session of every editor tab. The sidebar shows, per connection: connected when a tab is, else connecting, else
+  // failed when a tab's attempt failed; with no such tab it shows what its own tree knows.
+  const [dicSessions, setDicSessions] = useState<Record<string, { connectionId: string; state: SessionState }>>({});
+  const trackSession = useCallback((strTabId: string, strConnectionId: string, strState: SessionState | null) => {
+    setDicSessions(dicPrev => {
+      if (strState === null) {
+        if (!(strTabId in dicPrev)) return dicPrev;
+        const dicNext = { ...dicPrev };
+        delete dicNext[strTabId];
+        return dicNext;
+      }
+      const objOld = dicPrev[strTabId];
+      return objOld?.state === strState && objOld.connectionId === strConnectionId ? dicPrev : { ...dicPrev, [strTabId]: { connectionId: strConnectionId, state: strState } };
+    });
+    if (strState === 'open') markConnected(strConnectionId);
+  }, [markConnected]);
+  const dicTabStatus = useMemo(() => {
+    const dicStates: Record<string, Set<SessionState>> = {};
+    for (const objItem of Object.values(dicSessions)) (dicStates[objItem.connectionId] ??= new Set()).add(objItem.state);
+    const dicResult: Record<string, TreeStatus> = {};
+    for (const [strId, hsStates] of Object.entries(dicStates)) {
+      if (hsStates.has('open')) dicResult[strId] = 'ok';
+      else if (hsStates.has('opening')) dicResult[strId] = 'loading';
+      else if (hsStates.has('failed')) dicResult[strId] = 'failed';
+    }
+    return dicResult;
+  }, [dicSessions]);
 
   const trackTransaction = useCallback((strTabId: string, boolOpen: boolean) => {
     if (boolOpen) refTxTabIds.current.add(strTabId);
@@ -462,6 +533,8 @@ export default function App() {
         { label: 'New connection…', icon: <IconPlus intSize={14} />, onSelect: () => setObjDialog({ mode: 'new' }) },
         { label: 'Edit this connection…', disabled: !objActiveConnection,
           onSelect: () => { if (objActiveConnection) setObjDialog({ mode: 'edit', connection: objActiveConnection }); } },
+        { label: 'Disconnect', disabled: !objActiveConnection,
+          onSelect: () => { if (objActiveConnection) disconnectConnection(objActiveConnection.id); } },
         { label: 'Refresh schema', disabled: !objActiveConnection,
           onSelect: () => { if (objActiveConnection) loadMetadata(objActiveConnection.id, true).catch(() => {}); } },
         { kind: 'separator' },
@@ -483,7 +556,7 @@ export default function App() {
       {boolUpdate && (
         <UpdateDialog onClose={() => setBoolUpdate(false)}
           strUnsaved={(() => {
-            const boolUnsaved = arrTabs.some(objTab => objTab.kind === 'query' && objTab.filePath && hsDirty.has(objTab.id));
+            const boolUnsaved = arrTabs.some(isUnsaved);
             const boolTransaction = arrTabs.some(objTab => refTxTabIds.current.has(objTab.id));
             return boolUnsaved || boolTransaction
               ? `Some tabs have ${boolUnsaved ? 'unsaved changes' : ''}${boolUnsaved && boolTransaction ? ' and ' : ''}${boolTransaction ? 'an uncommitted transaction (it will be rolled back)' : ''}.`
@@ -515,6 +588,10 @@ export default function App() {
         onDelete={remove}
         intWidth={intSidebarWidth}
         boolHidden={!boolSidebarOpen}
+        objLink={objLink}
+        onDisconnect={disconnectConnection}
+        onNewTab={strId => newQueryTab(strId)}
+        dicTabStatus={dicTabStatus}
         renderTree={(objConnection, boolActive, objControl) => {
           const objReveal = boolActive && objActiveTab && objActiveTab.kind !== 'query' ? objActiveTab.object : null;
           return objConnection.kind === 'Redis'
@@ -585,14 +662,39 @@ export default function App() {
                 ref={objTab.id === strActiveTabId ? objElement => objElement?.scrollIntoView({ block: 'nearest', inline: 'nearest' }) : undefined}
                 title={tabTitle(objTab, objConnection)}
                 onClick={() => setStrActiveTabId(objTab.id)}
+                draggable
+                onDragStart={objEvent => {
+                  refDragTab.current = objTab.id;
+                  objEvent.dataTransfer.effectAllowed = 'move';
+                  objEvent.dataTransfer.setData('text/plain', tabLabel(objTab, objConnection));
+                }}
+                onDragOver={objEvent => {
+                  if (!refDragTab.current) return; // something else is being dragged
+                  objEvent.preventDefault();
+                  objEvent.dataTransfer.dropEffect = 'move';
+                  const objRect = objEvent.currentTarget.getBoundingClientRect();
+                  const boolAfter = objEvent.clientX > objRect.left + objRect.width / 2;
+                  setObjDropTab(objPrev => (objPrev?.id === objTab.id && objPrev.after === boolAfter ? objPrev : { id: objTab.id, after: boolAfter }));
+                }}
+                onDrop={objEvent => {
+                  objEvent.preventDefault();
+                  if (refDragTab.current && objDropTab) moveTab(refDragTab.current, objDropTab.id, objDropTab.after);
+                }}
+                onDragEnd={() => { refDragTab.current = null; setObjDropTab(null); }}
                 className={`group flex h-8 max-w-56 shrink-0 items-center gap-2 rounded-t border border-b-0 px-3 ${
                   objTab.id === strActiveTabId ? 'border-line bg-panel' : 'border-transparent text-muted hover:bg-hover'
                 }`}
-                style={{ boxShadow: objTab.id === strActiveTabId ? `inset 0 2px 0 ${envVar(objConnection.color)}` : undefined }}
+                style={{
+                  boxShadow: [
+                    objTab.id === strActiveTabId ? `inset 0 2px 0 ${envVar(objConnection.color)}` : '',
+                    // where the dragged tab lands
+                    objDropTab?.id === objTab.id && refDragTab.current !== objTab.id ? `inset ${objDropTab.after ? '-3px' : '3px'} 0 0 var(--accent)` : '',
+                  ].filter(Boolean).join(', ') || undefined,
+                }}
               >
                 <span style={{ color: envVar(objConnection.color) }}>{tabIcon(objTab)}</span>
                 <span className="truncate">{tabLabel(objTab, objConnection)}</span>
-                {objTab.kind === 'query' && objTab.filePath && hsDirty.has(objTab.id) && (
+                {(objTab.kind === 'query' ? hsDirty.has(objTab.id) : hsSourceDirty.has(objTab.id)) && (
                   <span className="-ml-1 text-accent" title="Not saved" aria-label="Not saved">●</span>
                 )}
                 <button
@@ -635,6 +737,7 @@ export default function App() {
                 boolActive={objTab.id === strActiveTabId}
                 onOpenSql={(strSql, boolAutoRun) => newQueryTab(objConnection.id, strSql, boolAutoRun)}
                 onExecute={() => openObject(objConnection.id, objTab.object, 'routine')}
+                onDirtyChange={boolDirty => markSource(objTab.id, boolDirty)}
                 objMetadata={dicMetadata[objConnection.id]}
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 onRenamed={strNewName => setArrTabs(arrPrev => arrPrev.map(objItem => (objItem.id === objTab.id && objItem.kind === 'object'
@@ -660,6 +763,9 @@ export default function App() {
                 strInitialSql={objTab.initialSql}
                 boolAutoRun={objTab.autoRun}
                 boolWordWrap={boolWordWrap}
+                intDisconnect={dicDisconnect[objConnection.id] ?? 0}
+                onDisconnect={disconnectConnection}
+                onSessionState={trackSession}
                 onToggleWordWrap={toggleWordWrap}
                 boolLazyConnect={objTab.restored && objTab.id !== strActiveTabId}
               />

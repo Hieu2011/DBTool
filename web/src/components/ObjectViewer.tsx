@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { monaco } from '../monaco';
 import { api, ApiError } from '../api';
-import { countQuery, editorLanguage, selectAllQuery } from '../sql/dialect';
+import { countQuery, dialectOf, editorLanguage, selectAllQuery } from '../sql/dialect';
+import { splitStatements } from '../sql/statements';
+import { showToast } from '../toast';
 import { qualifiedName } from '../sql/identifiers';
 import type { Connection, DbObjectInfo, ObjectDetail, QueryResult, SchemaMetadata } from '../types';
 import { envVar } from '../envColor';
-import { IconClose } from './icons';
+import { IconClose, IconComment, IconRedo, IconSave, IconUndo } from './icons';
+import { debugScript } from '../sql/routineSource';
 import { ResultGrid } from './ResultGrid';
 import { EditableResult } from './EditableResult';
 import { TABLE_LIKE } from './ObjectTree';
@@ -31,6 +34,8 @@ interface Props {
   onOpenObject: (objObject: DbObjectInfo) => void;
   /** The table was renamed: the tab now shows it under the new name. */
   onRenamed: (strNewName: string) => void;
+  /** The Source was edited / saved / reverted: the tab shows a mark. */
+  onDirtyChange?: (boolDirty: boolean) => void;
 }
 
 type LoadState =
@@ -80,6 +85,85 @@ function DdlView({ strDdl, strLanguage }: { strDdl: string; strLanguage: string 
   }, [strDdl, strLanguage]);
 
   return <div ref={refHost} className="h-full" />;
+}
+
+// CREATE [OR REPLACE] <kind> [schema.]name at the start of a statement.
+const SOURCE_HEADER = /^create\s+(?:or\s+replace\s+)?(?:(?:non)?editionable\s+)?(procedure|function|package(?:\s+body)?)\s+(?:("[^"]+"|[\w$#]+)\s*\.\s*)?("[^"]+"|[\w$#]+)/i;
+const bareName = (strName: string) => strName.replace(/^"|"$/g, '').toLowerCase();
+const unixEol = (strText: string) => strText.replace(/\r\n?/g, '\n');
+
+/** A routine's code, editable: Ctrl+S compiles it. */
+type SourceHandle = { trigger: (strAction: string) => void };
+
+function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, onHistory, refHandle }: {
+  strText: string; strLanguage: string; boolReadOnly: boolean; onChange: (strValue: string) => void; onSave: () => void;
+  /** Whether there is something to undo / redo, after every change. */
+  onHistory: (boolCanUndo: boolean, boolCanRedo: boolean) => void;
+  /** Toolbar buttons act on the editor through this. */
+  refHandle: React.MutableRefObject<SourceHandle | null>;
+}) {
+  const refOnHistory = useRef(onHistory);
+  refOnHistory.current = onHistory;
+  const refHost = useRef<HTMLDivElement>(null);
+  const refEditor = useRef<ReturnType<typeof monaco.editor.create> | null>(null);
+  const refSetting = useRef(false); // setValue from outside is not a user change
+  const refOnChange = useRef(onChange);
+  refOnChange.current = onChange;
+  const refOnSave = useRef(onSave);
+  refOnSave.current = onSave;
+  const refText = useRef(strText);
+  refText.current = strText;
+
+  useEffect(() => {
+    const objModel = monaco.editor.createModel(refText.current, strLanguage);
+    const objEditor = monaco.editor.create(refHost.current!, {
+      model: objModel,
+      multiCursorModifier: 'ctrlCmd', // Alt + drag = column block
+      automaticLayout: true,
+      minimap: { enabled: false },
+      fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
+      fontSize: 13,
+      lineHeight: 20,
+      scrollBeyondLastLine: false,
+      padding: { top: 8 },
+    });
+    objEditor.onDidChangeModelContent(() => {
+      if (!refSetting.current) refOnChange.current(objModel.getValue());
+      refOnHistory.current(objModel.canUndo(), objModel.canRedo());
+    });
+    refHandle.current = { trigger: strAction => { objEditor.trigger('toolbar', strAction, null); objEditor.focus(); } };
+    objEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => refOnSave.current());
+    refEditor.current = objEditor;
+    return () => {
+      refEditor.current = null;
+      refHandle.current = null;
+      refOnHistory.current(false, false);
+      objEditor.dispose();
+      objModel.dispose();
+    };
+  }, [strLanguage, refHandle]);
+
+  // Reverted or reloaded: the editor follows, the cursor stays where it was.
+  useEffect(() => {
+    const objEditor = refEditor.current;
+    const objModel = objEditor?.getModel();
+    if (!objEditor || !objModel || unixEol(objModel.getValue()) === unixEol(strText)) return;
+    const objView = objEditor.saveViewState();
+    refSetting.current = true;
+    objModel.setValue(strText);
+    refSetting.current = false;
+    if (objView) objEditor.restoreViewState(objView);
+  }, [strText]);
+
+  const refWasReadOnly = useRef(false);
+  useEffect(() => {
+    refEditor.current?.updateOptions({ readOnly: boolReadOnly });
+    // The save is over: typing goes on where it stopped.
+    if (refWasReadOnly.current && !boolReadOnly) refEditor.current?.focus();
+    refWasReadOnly.current = boolReadOnly;
+  }, [boolReadOnly]);
+
+  return <div ref={refHost} data-source-editor className="h-full" />;
 }
 
 const cellOf = (objGrid: QueryResult | undefined, arrRow: unknown[] | undefined, strColumn: string): unknown => {
@@ -151,7 +235,7 @@ function ColumnProperties({ objColumns, arrRow, objConstraints }: { objColumns: 
   );
 }
 
-export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata, onOpenSql, onExecute, onOpenObject, onRenamed }: Props) {
+export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata, onOpenSql, onExecute, onOpenObject, onRenamed, onDirtyChange }: Props) {
   const [objState, setObjState] = useState<LoadState>({ status: 'loading' });
   const [strActive, setStrActive] = useState<string | null>(null);
   const [strCount, setStrCount] = useState<string | null>(null);
@@ -168,6 +252,12 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   // Data tab shows the import screen for the file the user just picked.
   const [objImportFile, setObjImportFile] = useState<File | null>(null);
   const refImportPicker = useRef<HTMLInputElement>(null);
+  // Source tab: the edited code (null = untouched), kept while other tabs are shown.
+  const [strDraft, setStrDraft] = useState<string | null>(null);
+  const [boolSaving, setBoolSaving] = useState(false);
+  const refSource = useRef<SourceHandle | null>(null);
+  const [objHistory, setObjHistory] = useState({ undo: false, redo: false });
+  const refSaved = useRef(false); // a save just ran: the reload is silent and reports the compile errors
 
   const { schema: strSchema, name: strName, type: strType, signature: strSignature } = objObject;
   const strQualified = qualifiedName(strSchema, strName, objConnection.kind);
@@ -176,7 +266,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
 
   useEffect(() => {
     let boolStale = false;
-    setObjState({ status: 'loading' });
+    if (!refSaved.current) setObjState({ status: 'loading' }); // after a save the editor stays on screen
     const objTarget = { schema: strSchema, name: strName, type: strType, signature: strSignature };
     // A table shows its columns as soon as the quick grids answer; the full answer (DDL, usages) replaces them when it comes.
     if (TABLE_LIKE.has(strType)) {
@@ -251,7 +341,79 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
     }
   };
 
+  // The reload after a save is back: Oracle compiles "with errors" without failing the statement.
+  useEffect(() => {
+    if (!refSaved.current || objState.status === 'loading') return;
+    refSaved.current = false;
+    setBoolSaving(false);
+    if (objState.status !== 'done') return;
+    setStrDraft(null);
+    const intErrors = objState.detail.sections.find(objItem => objItem.title === 'Errors')?.result.rows.length ?? 0;
+    if (intErrors > 0) {
+      showToast('error', `${strName}: saved with ${intErrors} compile ${intErrors === 1 ? 'error' : 'errors'}`, 'See the Errors tab.');
+      setStrActive('Errors');
+    } else showToast('success', `${strName}: saved`);
+  }, [objState, strName]);
+
+  /** Open in editor: the body with sample values instead of the parameters, so its queries run on their own. */
+  const openDebug = async (strCode: string) => {
+    if (strType !== 'PROCEDURE' && strType !== 'FUNCTION') return onOpenSql(strCode, false);
+    // The catalog knows the real type behind TABLE.COLUMN%TYPE.
+    const dicTypes: Record<string, string> = {};
+    try {
+      const objInfo = await api.routineInfo(objConnection.id, objObject);
+      for (const objParameter of objInfo.parameters) dicTypes[objParameter.name.toLowerCase()] = objParameter.dataType;
+    } catch { /* the types written in the code are used */ }
+    onOpenSql(debugScript(strCode, dialectOf(objConnection.kind) !== 'oracle', `${strSchema}.${strName}`, dicTypes) ?? strCode, false);
+  };
+
   const objDetail = objState.status === 'done' ? objState.detail : undefined;
+  const strSource = strDraft ?? objDetail?.ddl ?? '';
+  const boolSourceDirty = strDraft !== null;
+  const refOnDirtyChange = useRef(onDirtyChange);
+  refOnDirtyChange.current = onDirtyChange;
+  useEffect(() => {
+    refOnDirtyChange.current?.(boolSourceDirty);
+    return () => refOnDirtyChange.current?.(false); // tab closed
+  }, [boolSourceDirty]);
+
+  /** Compiles the edited code. Only statements that create this very object are accepted. */
+  const saveSource = async () => {
+    if (strDraft === null || boolSaving) return;
+    const boolOracle = dialectOf(objConnection.kind) === 'oracle';
+    const arrStatements = splitStatements(unixEol(strDraft), dialectOf(objConnection.kind));
+    const strProblem = arrStatements.length === 0 ? 'There is no code to save.' : arrStatements.map(objStatement => {
+      const arrHeader = SOURCE_HEADER.exec(objStatement.text);
+      const strKind = arrHeader?.[1].replace(/\s+/g, ' ').toUpperCase();
+      if (!arrHeader || (strKind !== strType && !(strType === 'PACKAGE' && strKind === 'PACKAGE BODY')))
+        return `Every statement must be CREATE OR REPLACE ${strType} ${strSchema}.${strName}.`;
+      // Oracle: a missing schema is fine, the statement runs with CURRENT_SCHEMA set to the object's.
+      const boolSchemaOk = arrHeader[2] ? bareName(arrHeader[2]) === strSchema.toLowerCase() : boolOracle;
+      return bareName(arrHeader[3]) === strName.toLowerCase() && boolSchemaOk
+        ? null
+        : `The code creates ${arrHeader[2] ? `${arrHeader[2]}.` : ''}${arrHeader[3]}, not ${strSchema}.${strName}. Use "Open in editor" to create another object.`;
+    }).find(strItem => strItem !== null);
+    if (strProblem) {
+      showToast('error', `${strName}: not saved`, strProblem);
+      return;
+    }
+    if (!confirm(`Compile ${strType} ${strSchema}.${strName} on "${objConnection.name}"?\n\nThe code in the database is replaced right away.`)) return;
+
+    setBoolSaving(true);
+    const strSessionId = crypto.randomUUID();
+    try {
+      if (boolOracle)
+        await api.query(crypto.randomUUID(), objConnection.id, `ALTER SESSION SET CURRENT_SCHEMA = "${strSchema.replace(/"/g, '')}"`, 1, strSessionId);
+      for (const objStatement of arrStatements) await api.query(crypto.randomUUID(), objConnection.id, objStatement.text, 1, strSessionId);
+      refSaved.current = true;
+      setIntReload(intPrev => intPrev + 1);
+    } catch (objEx) {
+      setBoolSaving(false);
+      showToast('error', `${strName}: not saved`, errorMessage(objEx));
+    } finally {
+      api.closeSession(strSessionId).catch(() => {});
+    }
+  };
   const boolPartial = objState.status === 'done' && !!objState.partial;
   const boolRoutine = ROUTINE_TYPES.includes(strType);
   const arrTabs = objDetail
@@ -376,8 +538,23 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                   )}
                   {strShown === SOURCE_TAB && objDetail.ddl && (
                     <>
-                      <button className="btn h-6 px-2" onClick={() => navigator.clipboard.writeText(objDetail.ddl ?? '')}>Copy</button>
-                      <button className="btn h-6 px-2" onClick={() => onOpenSql(objDetail.ddl ?? '', false)}>Open in editor</button>
+                      {boolSourceDirty && <span className="text-xs text-accent">● Modified</span>}
+                      <button className="icon-btn h-6" onClick={() => refSource.current?.trigger('undo')} disabled={!objHistory.undo}
+                        aria-label="Undo" title="Undo (Ctrl+Z)"><IconUndo /></button>
+                      <button className="icon-btn h-6" onClick={() => refSource.current?.trigger('redo')} disabled={!objHistory.redo}
+                        aria-label="Redo" title="Redo (Ctrl+Y)"><IconRedo /></button>
+                      <button className="icon-btn h-6" onClick={() => refSource.current?.trigger('editor.action.commentLine')}
+                        title="Comment / uncomment the selected lines (Ctrl+/)"><IconComment /> Comment</button>
+                      <span className="toolbar-sep" />
+                      <button className="btn btn-primary h-6 px-2" onClick={saveSource} disabled={!boolSourceDirty || boolSaving}
+                        title="Compile this code in the database (Ctrl+S)">
+                        <IconSave intSize={13} /> {boolSaving ? 'Saving…' : 'Save'}
+                      </button>
+                      <button className="btn h-6 px-2" onClick={() => setStrDraft(null)} disabled={!boolSourceDirty || boolSaving}
+                        title="Back to the code in the database">Revert</button>
+                      <button className="btn h-6 px-2" onClick={() => navigator.clipboard.writeText(strSource)}>Copy</button>
+                      <button className="btn h-6 px-2" onClick={() => openDebug(strSource)}
+                        title="New tab with the body of the routine: parameters replaced by sample values, ready to run query by query">Open in editor</button>
                     </>
                   )}
                   {!boolRoutine && boolDdlTab && (
@@ -423,7 +600,11 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                     )
                     : <ResultGrid key={objSection.title} objResult={objSection.result} strExportName={`${strName}-${objSection.title.toLowerCase()}`} />)}
                 {strShown === SOURCE_TAB && (objDetail.ddl
-                  ? <DdlView strDdl={objDetail.ddl} strLanguage={editorLanguage(objConnection.kind)} />
+                  ? (
+                    <SourceEditor strText={strSource} strLanguage={editorLanguage(objConnection.kind)} boolReadOnly={boolSaving}
+                      refHandle={refSource} onHistory={(boolUndo, boolRedo) => setObjHistory(objPrev => (objPrev.undo === boolUndo && objPrev.redo === boolRedo ? objPrev : { undo: boolUndo, redo: boolRedo }))}
+                      onChange={strValue => setStrDraft(unixEol(strValue) === unixEol(objDetail.ddl ?? '') ? null : strValue)} onSave={saveSource} />
+                  )
                   : (
                     <p className="whitespace-pre-wrap p-4 text-muted" style={{ userSelect: 'text' }}>
                       {boolPartial ? 'Loading…' : objDetail.ddlError ?? 'No source is available for this object.'}

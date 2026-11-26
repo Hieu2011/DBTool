@@ -17,7 +17,7 @@ import { envVar } from '../envColor';
 import { CodeView } from './CodeView';
 import { ResultGrid } from './ResultGrid';
 import { EditableResult } from './EditableResult';
-import { KindIcon, IconCheck, IconComment, IconFormat, IconPlay, IconPlayAll, IconPlug, IconRefresh, IconStop, IconUndo, IconUnplug } from './icons';
+import { KindIcon, IconCheck, IconChevronDown, IconChevronUp, IconClose, IconComment, IconFormat, IconPlay, IconPlayAll, IconPlug, IconRedo, IconRefresh, IconStop, IconUndo, IconUnplug } from './icons';
 
 registerSqlCompletion(monaco);
 registerSqlFolding(monaco);
@@ -53,6 +53,12 @@ interface Props {
   /** Long lines wrap inside the editor (View > Word wrap, Alt+Z); kept in the app settings. */
   boolWordWrap: boolean;
   onToggleWordWrap: () => void;
+  /** Raised by the app when the connection is disconnected: this tab closes its session. */
+  intDisconnect: number;
+  /** The Disconnect button: the app asks about open transactions, then disconnects every tab of the connection. */
+  onDisconnect: (strConnectionId: string) => void;
+  /** This tab's session changed state; null when the tab goes away. */
+  onSessionState: (strTabId: string, strConnectionId: string, strState: SessionState | null) => void;
 }
 
 /** What the app menu and its shortcuts can ask of an editor tab. */
@@ -78,7 +84,7 @@ type RunState =
   | { status: 'running'; queryId: string; startedAt: number; index: number; total: number }
   | { status: 'done'; skipped: number };
 
-type SessionState = 'closed' | 'opening' | 'open' | 'failed';
+export type SessionState = 'closed' | 'opening' | 'open' | 'failed';
 
 const SESSION_LABEL: Record<SessionState, string> = {
   closed: 'Disconnected', opening: 'Connecting…', open: 'Connected', failed: 'Connection failed',
@@ -99,8 +105,10 @@ const runLabel = ({ result: objResult, error: objError }: StatementRun) => {
 };
 
 export function QueryWorkspace({
-  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, boolWordWrap, onToggleWordWrap, onOpenObject,
+  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, boolWordWrap, onToggleWordWrap, intDisconnect, onDisconnect, onSessionState, onOpenObject,
 }: Props) {
+  const refOnSessionState = useRef(onSessionState);
+  refOnSessionState.current = onSessionState;
   const refOnToggleWordWrap = useRef(onToggleWordWrap);
   refOnToggleWordWrap.current = onToggleWordWrap;
   const refOnOpenObject = useRef(onOpenObject);
@@ -128,6 +136,8 @@ export function QueryWorkspace({
   const [objLive, setObjLive] = useState<QueryResult | null>(null);
   const [intMaxRows, setIntMaxRows] = useState(1000);
   const [intEditorHeight, setIntEditorHeight] = useState(280);
+  // Which of the two panes are shown: the arrows on the splitter give one of them the whole tab.
+  const [strPane, setStrPane] = useState<'both' | 'editor' | 'results'>('both');
   const [strMetaState, setStrMetaState] = useState<'idle' | 'loading' | string>('idle');
   const [lngNow, setLngNow] = useState(Date.now());
   // One DB session per tab: keeps the transaction and session settings between runs.
@@ -137,6 +147,8 @@ export function QueryWorkspace({
   const [strSession, setStrSession] = useState<SessionState>('closed');
   const refOpening = useRef<Promise<void> | null>(null);
   const refCursor = useRef<HTMLSpanElement>(null);
+  const [boolCanUndo, setBoolCanUndo] = useState(false);
+  const [boolCanRedo, setBoolCanRedo] = useState(false);
 
   const showError = (strSql: string, objEx: unknown) => {
     setArrRuns([{ sql: strSql, error: toQueryError(objEx) }]);
@@ -159,13 +171,22 @@ export function QueryWorkspace({
     refOpening.current = objOpening;
   };
 
-  const disconnect = async () => {
-    if (boolTxOpen && !confirm('This tab has an uncommitted transaction. Disconnecting rolls it back.\n\nDisconnect anyway?')) return;
+  // Disconnect is for the whole connection: the app raises intDisconnect and every tab of it closes its session.
+  const refDisconnect = useRef(intDisconnect);
+  useEffect(() => {
+    if (intDisconnect === refDisconnect.current) return;
+    refDisconnect.current = intDisconnect;
     refOpening.current = null;
-    await api.closeSession(strSessionId).catch(() => {});
+    api.closeSession(strSessionId).catch(() => {});
     setStrSession('closed');
     setBoolTxOpen(false);
-  };
+  }, [intDisconnect, strSessionId]);
+
+  // The sidebar shows one state per connection, made of its tabs' sessions: tell the app every change, and the end.
+  useEffect(() => {
+    refOnSessionState.current(strTabId, objConnection.id, strSession);
+  }, [strTabId, objConnection.id, strSession]);
+  useEffect(() => () => refOnSessionState.current(strTabId, objConnection.id, null), [strTabId, objConnection.id]);
 
   // Connects when the tab opens (an auto-run tab connects with its first statement) and closes with it.
   useEffect(() => {
@@ -310,6 +331,10 @@ export function QueryWorkspace({
     };
     objEditor.onDidChangeCursorPosition(showCursor);
     objModel.onDidChangeContent(() => refOnContentChange.current?.(strTabId));
+    // Undo / Redo buttons go dim when there is nothing to step to. Same value = no re-render, so typing stays cheap.
+    const showHistory = () => { setBoolCanUndo(objModel.canUndo()); setBoolCanRedo(objModel.canRedo()); };
+    objModel.onDidChangeContent(showHistory);
+    showHistory();
     // Suggestions follow every edit. Monaco alone opens them only for a character typed at the end of a word: not after
     // Backspace, not inside a word. So whenever the text changes and the list is closed, ask again (quietly: no
     // "No suggestions" box).
@@ -369,8 +394,9 @@ export function QueryWorkspace({
   }, [objConnection.id, loadMetadata]);
 
   useEffect(() => {
-    if (boolActive && !objMetadata && strMetaState === 'idle') fetchMeta(false);
-  }, [boolActive, objMetadata, strMetaState, fetchMeta]);
+    // Not while disconnected: loading the schema would connect again behind the user's back.
+    if (boolActive && !objMetadata && strMetaState === 'idle' && strSession !== 'closed') fetchMeta(false);
+  }, [boolActive, objMetadata, strMetaState, fetchMeta, strSession]);
 
   // ---- running ----
   useEffect(() => {
@@ -416,6 +442,8 @@ export function QueryWorkspace({
       }
     }
 
+    // A run shows its result: hidden results come back.
+    setStrPane(strPrev => (strPrev === 'editor' ? 'both' : strPrev));
     monaco.editor.setModelMarkers(objModel, MARKER_OWNER, []);
     const lngStartedAt = Date.now();
     setLngNow(lngStartedAt);
@@ -501,6 +529,11 @@ export function QueryWorkspace({
     refEditor.current?.trigger('toolbar', FORMAT_ACTION, null);
   };
 
+  const undoRedo = (strAction: 'undo' | 'redo') => {
+    refEditor.current?.trigger('toolbar', strAction, null);
+    refEditor.current?.focus();
+  };
+
   const toggleComment = () => {
     refEditor.current?.trigger('toolbar', 'editor.action.commentLine', null);
     refEditor.current?.focus();
@@ -576,7 +609,7 @@ export function QueryWorkspace({
         </button>
         <button className="icon-btn" onClick={() => execute(true)} disabled={boolRunning} aria-label="Run all"
           title="Run every statement of the selection, or of the whole editor, one by one (F5)">
-          <IconPlayAll /> <span className="hidden @3xl:inline">Run all</span>
+          <IconPlayAll /> <span className="hidden @6xl:inline">Run all</span>
         </button>
         <button className={`icon-btn ${boolRunning ? 'text-danger' : ''}`} onClick={stop} disabled={!boolRunning}
           aria-label="Stop" title="Stop the running statement">
@@ -584,13 +617,19 @@ export function QueryWorkspace({
         </button>
 
         <span className="toolbar-sep" />
-        <button className="icon-btn" onClick={toggleComment} aria-label="Toggle comment"
-          title="Comment / uncomment the selected lines (Ctrl+/)">
-          <IconComment />
+        <button className="icon-btn" onClick={() => undoRedo('undo')} disabled={!boolCanUndo} aria-label="Undo" title="Undo (Ctrl+Z)">
+          <IconUndo /> <span className="hidden @7xl:inline">Undo</span>
         </button>
-        <button className={`icon-btn ${boolSql ? '' : 'hidden'}`} onClick={format} aria-label="Format SQL"
-          title="Format the selection, or the whole editor (Ctrl+Shift+F)">
-          <IconFormat />
+        <button className="icon-btn" onClick={() => undoRedo('redo')} disabled={!boolCanRedo} aria-label="Redo" title="Redo (Ctrl+Y)">
+          <IconRedo /> <span className="hidden @7xl:inline">Redo</span>
+        </button>
+
+        <span className="toolbar-sep" />
+        <button className="icon-btn" onClick={toggleComment} title="Comment / uncomment the selected lines (Ctrl+/)">
+          <IconComment /> Comment
+        </button>
+        <button className={`icon-btn ${boolSql ? '' : 'hidden'}`} onClick={format} title="Format the selection, or the whole editor (Ctrl+Shift+F)">
+          <IconFormat /> Format
         </button>
 
         {/* transaction */}
@@ -622,14 +661,14 @@ export function QueryWorkspace({
 
         <span className="toolbar-sep" />
         <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted" title="Rows fetched per statement">
-          <span className="hidden @2xl:inline">Limit</span>
+          <span className="hidden @6xl:inline">Limit</span>
           <select className="field h-[26px] w-auto py-0 text-xs" value={intMaxRows} onChange={objEvent => setIntMaxRows(Number(objEvent.target.value))}>
             {MAX_ROWS.map(intCount => <option key={intCount} value={intCount}>{intCount.toLocaleString()}</option>)}
           </select>
         </label>
 
         {/* session */}
-        <div className="ml-auto flex min-w-0 items-center gap-1 pl-2">
+        <div className="ml-auto flex min-w-[12rem] flex-1 basis-0 items-center justify-end gap-1 pl-2">
           {/* the connection this tab runs on */}
           <label className="flex min-w-0 items-center gap-1.5" title="Connection of this tab. Changing it keeps the text and opens a new session.">
             <span className="shrink-0"><KindIcon strKind={objConnection.kind} intSize={16} /></span>
@@ -651,8 +690,8 @@ export function QueryWorkspace({
           </span>
           {strSession === 'open'
             ? (
-              <button className="icon-btn shrink-0" onClick={disconnect} disabled={boolRunning} aria-label="Disconnect"
-                title="Disconnect: close this tab's database session">
+              <button className="icon-btn shrink-0" onClick={() => onDisconnect(objConnection.id)} disabled={boolRunning} aria-label="Disconnect"
+                title="Disconnect: close every session of this connection">
                 <IconUnplug /> <span className="hidden @[92rem]:inline">Disconnect</span>
               </button>
             )
@@ -675,17 +714,44 @@ export function QueryWorkspace({
       </div>
 
       {/* editor */}
-      <div ref={refHost} style={{ height: intEditorHeight }} className="shrink-0" />
+      <div ref={refHost} style={strPane === 'both' ? { height: intEditorHeight } : undefined}
+        className={strPane === 'both' ? 'shrink-0' : strPane === 'editor' ? 'min-h-0 flex-1' : 'hidden'} />
 
-      <div
-        onPointerDown={startResize}
-        className="h-1.5 shrink-0 cursor-row-resize border-y border-line bg-bg hover:bg-hover"
-        role="separator"
-        aria-orientation="horizontal"
-      />
+      {/* splitter: drag to resize, arrows to give one pane the whole tab, cross to hide the results */}
+      <div className="flex h-4 shrink-0 items-stretch border-y border-line bg-bg text-muted">
+        <div onPointerDown={strPane === 'both' ? startResize : undefined} role="separator" aria-orientation="horizontal"
+          className={`flex-1 ${strPane === 'both' ? 'cursor-row-resize hover:bg-hover' : ''}`} />
+        <button className="flex w-7 items-center justify-center hover:bg-hover hover:text-fg disabled:opacity-30" disabled={strPane === 'results'}
+          aria-label="Results up" title={strPane === 'editor' ? 'Show the results' : 'Results take the whole tab'}
+          onClick={() => setStrPane(strPrev => (strPrev === 'editor' ? 'both' : 'results'))}>
+          <IconChevronUp intSize={13} />
+        </button>
+        <button className="flex w-7 items-center justify-center hover:bg-hover hover:text-fg disabled:opacity-30" disabled={strPane === 'editor'}
+          aria-label="Results down" title={strPane === 'results' ? 'Show the editor' : 'Hide the results'}
+          onClick={() => setStrPane(strPrev => (strPrev === 'results' ? 'both' : 'editor'))}>
+          <IconChevronDown intSize={13} />
+        </button>
+        <div onPointerDown={strPane === 'both' ? startResize : undefined}
+          className={`flex-1 ${strPane === 'both' ? 'cursor-row-resize hover:bg-hover' : ''}`} />
+        <button className={`flex w-7 items-center justify-center hover:bg-hover hover:text-fg ${strPane === 'editor' ? 'invisible' : ''}`}
+          aria-label="Hide results" title="Hide the results" onClick={() => setStrPane('editor')}>
+          <IconClose intSize={12} />
+        </button>
+      </div>
 
-      {/* results */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* results: hidden, not unmounted (pending grid edits stay) */}
+      <div className={`min-h-0 flex-1 flex-col ${strPane === 'editor' ? 'hidden' : 'flex'}`}>
+        {boolRunning && objRun.status === 'running' && (
+          <div className="shrink-0 border-b border-line">
+            <div className="progress-bar rounded-none" />
+            <div className="flex h-7 items-center gap-3 px-3 text-xs">
+              <span>Running{objRun.total > 1 && ` statement ${objRun.index + 1} of ${objRun.total}`}…</span>
+              <span className="tabular-nums text-fg">{((lngNow - objRun.startedAt) / 1000).toFixed(1)} s</span>
+              {objLive && <span className="text-muted">{objLive.rows.length.toLocaleString()} rows so far</span>}
+              <button className="btn ml-auto h-5 px-2 text-danger" onClick={stop}><IconStop intSize={11} /> Stop</button>
+            </div>
+          </div>
+        )}
         {/* one tab per statement of the last run */}
         {objRun.status === 'done' && arrRuns.length > 1 && (
           <div className="flex h-7 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-2" role="tablist">
@@ -742,7 +808,7 @@ export function QueryWorkspace({
           )}
           {boolRunning && (objLive
             ? <ResultGrid key="live" objResult={objLive} />
-            : <p className="p-4 text-muted">Running…</p>)}
+            : <p className="p-4 text-muted">Waiting for the first rows…</p>)}
         </div>
       </div>
 

@@ -15,7 +15,9 @@ internal sealed class MainForm : Form
         objUpdates.Attach(this);
         objExportTargets.Attach(this);
         objSqlFiles.Attach(this);
-        Text = boolDev ? "DbStudio (dev)" : "DbStudio";
+        // The version sits in the title bar: which build is this, at a glance.
+        var strVersion = $" v{UpdateService.CurrentVersion}";
+        Text = (boolDev ? "DbStudio (dev)" : "DbStudio") + strVersion;
         Width = 1440;
         Height = 900;
         StartPosition = FormStartPosition.CenterScreen;
@@ -67,8 +69,41 @@ internal sealed class MainForm : Form
             objCore.Settings.AreDefaultContextMenusEnabled = boolDev;
             // Frees Ctrl+R, Ctrl+P, F5... for the app itself. Ctrl+C/V/Z still work.
             objCore.Settings.AreBrowserAcceleratorKeysEnabled = boolDev;
+            // confirm() / alert() of the UI: the browser's own box is titled with the loopback address.
+            objCore.Settings.AreDefaultScriptDialogsEnabled = false;
+            objCore.ScriptDialogOpening += (_, objArgs) =>
+            {
+                var objDeferral = objArgs.GetDeferral();
+                // Modal: must not run inside the WebView2 event itself.
+                BeginInvoke(() =>
+                {
+                    try
+                    {
+                        switch (objArgs.Kind)
+                        {
+                            case CoreWebView2ScriptDialogKind.Confirm:
+                                if (MessageDialog.Show(this, objArgs.Message, true)) objArgs.Accept();
+                                break;
+                            case CoreWebView2ScriptDialogKind.Alert:
+                                MessageDialog.Show(this, objArgs.Message, false);
+                                break;
+                            case CoreWebView2ScriptDialogKind.Beforeunload:
+                                objArgs.Accept();
+                                break;
+                            // prompt() is not used by the UI: it stays dismissed.
+                        }
+                    }
+                    finally
+                    {
+                        objDeferral.Complete();
+                        // The closed dialog hands focus to the form, not to the page: without this the keyboard is dead in the UI.
+                        Activate();
+                        _objWeb.Focus();
+                    }
+                });
+            };
             objCore.NewWindowRequested += (_, objArgs) => objArgs.Handled = true;
-            objCore.DocumentTitleChanged += (_, _) => Text = objCore.DocumentTitle;
+            objCore.DocumentTitleChanged += (_, _) => Text = objCore.DocumentTitle + strVersion;
             // File > Exit in the UI calls window.close().
             objCore.WindowCloseRequested += (_, _) => Close();
 

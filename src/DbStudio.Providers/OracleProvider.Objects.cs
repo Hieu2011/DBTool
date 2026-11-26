@@ -331,7 +331,13 @@ public sealed partial class OracleProvider
                 var lstLines = await ColumnAsync(objConn,
                     "SELECT text FROM all_source WHERE owner = :schema AND name = :name AND type = :srctype ORDER BY line",
                     objObject, objCancelToken, ("srctype", strType));
-                if (lstLines.Count > 0) lstParts.Add("CREATE OR REPLACE " + string.Concat(lstLines).TrimEnd() + "\n/");
+                if (lstLines.Count == 0) continue;
+                // Oracle blanks the "SCHEMA." of the header out of the stored text: put it back.
+                var strCode = Regex.Replace(string.Concat(lstLines).TrimEnd(),
+                    $"""^\s*({strType.Replace(" ", @"\s+")})\s+"?{Regex.Escape(objObject.Name)}"?(?![\w$#."])""",
+                    objMatch => $"{objMatch.Groups[1].Value} {Ident(objObject.Schema)}.{Ident(objObject.Name)}",
+                    RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+                lstParts.Add("CREATE OR REPLACE " + strCode + "\n/");
             }
             return lstParts.Count == 0 ? null : string.Join("\n\n", lstParts);
         }

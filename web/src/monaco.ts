@@ -76,6 +76,7 @@ monaco.editor.defineTheme('dbstudio-light', {
   rules: [
     { token: 'keyword', foreground: '1F5FA8', fontStyle: 'bold' },
     { token: 'string', foreground: '8A4B08' },
+    { token: 'string.sql', foreground: '8A4B08' }, // the base theme paints SQL strings pure red
     { token: 'number', foreground: '0E7C66' },
     { token: 'comment', foreground: '7A8594', fontStyle: 'italic' },
   ],
@@ -94,6 +95,7 @@ monaco.editor.defineTheme('dbstudio-dark', {
   rules: [
     { token: 'keyword', foreground: '7DB3F0', fontStyle: 'bold' },
     { token: 'string', foreground: 'E3B072' },
+    { token: 'string.sql', foreground: 'E3B072' }, // the base theme paints SQL strings pure red
     { token: 'number', foreground: '6FD0B5' },
     { token: 'comment', foreground: '6B7584', fontStyle: 'italic' },
   ],

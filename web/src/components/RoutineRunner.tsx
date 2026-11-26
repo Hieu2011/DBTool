@@ -5,6 +5,7 @@ import { envVar } from '../envColor';
 import { ResultGrid } from './ResultGrid';
 import { DatePickerButton, isDateType } from './DatePicker';
 import { IconPlay, IconStop } from './icons';
+import { defaultInput, parseRoutine } from '../sql/routineSource';
 
 interface Props {
   objConnection: Connection;
@@ -55,6 +56,23 @@ export function RoutineRunner({ objConnection, objRoutine, boolActive }: Props) 
     return () => { boolStale = true; };
   }, [objConnection.id, strSchema, strName, strType, strSignature]);
 
+  // Defaults declared in the code (the catalog does not give them): prefilled, still editable.
+  const [dicDefaults, setDicDefaults] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let boolStale = false;
+    setDicDefaults({});
+    api.objectDetail(objConnection.id, { schema: strSchema, name: strName, type: strType, signature: strSignature }).then(objDetail => {
+      if (boolStale || !objDetail.ddl) return;
+      const dicFound: Record<string, string> = {};
+      for (const objParameter of parseRoutine(objDetail.ddl, objConnection.kind === 'PostgreSql')?.parameters ?? []) {
+        const strValue = defaultInput(objParameter.defaultSql);
+        if (strValue !== undefined) dicFound[objParameter.name.toLowerCase()] = strValue;
+      }
+      setDicDefaults(dicFound);
+    }, () => {});
+    return () => { boolStale = true; };
+  }, [objConnection.id, objConnection.kind, strSchema, strName, strType, strSignature]);
+
   useEffect(() => {
     if (objRun.status !== 'running') return;
     const intTimer = setInterval(() => setLngNow(Date.now()), 100);
@@ -64,8 +82,11 @@ export function RoutineRunner({ objConnection, objRoutine, boolActive }: Props) 
   const arrParameters = objInfo.status === 'done' ? objInfo.info.parameters : [];
   const boolRunning = objRun.status === 'running';
 
-  // A parameter nobody touched is sent as NULL.
-  const inputOf = (objParameter: RoutineParameter): ArgumentInput => dicInputs[objParameter.position] ?? { value: '', isNull: true };
+  // A parameter nobody touched is sent as its declared default, or NULL.
+  const inputOf = (objParameter: RoutineParameter): ArgumentInput => {
+    const strDefault = dicDefaults[objParameter.name.toLowerCase()];
+    return dicInputs[objParameter.position] ?? (strDefault !== undefined ? { value: strDefault, isNull: false } : { value: '', isNull: true });
+  };
   const setInput = (objParameter: RoutineParameter, objInput: ArgumentInput) =>
     setDicInputs(dicPrev => ({ ...dicPrev, [objParameter.position]: objInput }));
 

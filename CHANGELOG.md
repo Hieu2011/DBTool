@@ -2,6 +2,23 @@
 
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
+
+## 1.1.7 — 2026-11-26
+
+- Store (procedure / function / package): sửa code ngay ở tab Source rồi Save (Ctrl+S), có Undo / Redo / Comment; Oracle compile lỗi thì báo và mở tab Errors
+- Store: Open in editor mở bản debug của thân store - tham số thay bằng giá trị mẫu (ngày là hôm nay) kèm comment tên tham số, chạy được từng câu query
+- Form Execute tự điền giá trị default của tham số
+- Oracle: dòng đầu của Source hiện đủ SCHEMA.TÊN, hết khoảng trống thừa
+- Khung kết quả: mũi tên lên / xuống và nút ✕ trên thanh chia để ẩn hoặc phóng to; khi chạy query có thanh chạy, số giây và nút Stop
+- Tab: kéo thả để đổi thứ tự, dấu ● trên tab chưa lưu
+- Connection: icon chỉ có màu khi đã kết nối, Disconnect ngắt cả connection và thu gọn cây, trạng thái sidebar khớp với thanh công cụ
+- Connection: menu chuột phải (Connect, Disconnect, New SQL tab, Refresh, Edit, Delete), nút Edit cạnh nút Reload
+- Form connection: nút con mắt để xem mật khẩu đang gõ
+- Thanh công cụ editor: Undo / Redo, nút Comment và Format có chữ
+- Version hiện trên thanh tiêu đề cửa sổ
+- Hộp hỏi / thông báo theo màu của app, không còn hiện địa chỉ 127.0.0.1
+- Chuỗi trong nháy đơn màu cam nhạt thay cho đỏ
+
 ## 1.1.6 — 2026-11-26
 
 - Để thống kê người dùng, mỗi ngày một lần app báo về máy chủ update: tên đăng nhập Windows, tên máy, địa chỉ IP và version (form Updates có ghi rõ)

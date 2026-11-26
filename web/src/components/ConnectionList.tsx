@@ -4,6 +4,7 @@ import { KIND_LABEL } from '../types';
 import { envVar } from '../envColor';
 import { IconChevronDown, IconChevronRight, IconClose, IconPencil, IconPlus, IconRefresh, IconTrash, KindIcon } from './icons';
 import type { TreeStatus } from './useOuterScroll';
+import { ContextMenu, type MenuItem } from './ContextMenu';
 
 /** What the sidebar hands each tree: the one filter box and the Refresh button of its connection's row. */
 export interface TreeControl {
@@ -27,9 +28,16 @@ interface Props {
   onNew: () => void;
   onEdit: (objConnection: Connection) => void;
   onDelete: (objConnection: Connection) => void;
+  /** Right-click menu: a new editor tab on the connection, and closing everything it has open. */
+  onNewTab: (strId: string) => void;
+  onDisconnect: (strId: string) => void;
   intWidth: number;
   /** Hidden keeps the sidebar mounted, so the object trees keep what is open and loaded. */
   boolHidden: boolean;
+  /** Latest connect / disconnect of a connection from its tabs: connected unfolds it, disconnected folds it and drops its tree. */
+  objLink: { id: string; connected: boolean; serial: number } | null;
+  /** State of each connection as its editor tabs see it; it wins over what the tree knows. */
+  dicTabStatus: Record<string, TreeStatus>;
   /** The object / key tree of one connection, shown under its row. */
   renderTree: (objConnection: Connection, boolActive: boolean, objControl: TreeControl) => React.ReactNode;
 }
@@ -41,7 +49,7 @@ const without = (hsSet: Set<string>, strId: string) => { const hsNext = new Set(
  * list scrolls as one (the trees virtualize their rows against this scroller, see useOuterScroll).
  */
 export function ConnectionList({
-  arrConnections, strActiveId, hsOpenIds, strError, onOpen, onSelect, onNew, onEdit, onDelete, intWidth, boolHidden, renderTree,
+  arrConnections, strActiveId, hsOpenIds, strError, onOpen, onSelect, onNew, onEdit, onDelete, onNewTab, onDisconnect, intWidth, boolHidden, objLink, dicTabStatus, renderTree,
 }: Props) {
   const [hsExpanded, setHsExpanded] = useState<Set<string>>(new Set());
   // A tree stays mounted once shown: collapsing a connection must not drop what it loaded.
@@ -51,6 +59,7 @@ export function ConnectionList({
   const [dicStatus, setDicStatus] = useState<Record<string, TreeStatus>>({});
   const [objFailure, setObjFailure] = useState<{ id: string; message: string; refresh: boolean } | null>(null);
   const retry = (strId: string) => setDicRefresh(dicPrev => ({ ...dicPrev, [strId]: (dicPrev[strId] ?? 0) + 1 }));
+  const [objMenu, setObjMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const objFailed = objFailure ? arrConnections.find(objItem => objItem.id === objFailure.id) : undefined;
 
   useEffect(() => {
@@ -68,6 +77,41 @@ export function ConnectionList({
   const toggle = (strId: string) => {
     if (hsExpanded.has(strId)) setHsExpanded(hsPrev => without(hsPrev, strId));
     else { expand(strId); onSelect(strId); }
+  };
+
+  useEffect(() => {
+    if (!objLink) return;
+    const strId = objLink.id;
+    if (objLink.connected) {
+      expand(strId);
+      // A tab got through where the tree had failed: the tree tries again.
+      if (dicStatus[strId] === 'failed') retry(strId);
+      return;
+    }
+    // Unmounted: the tree's own connection state goes with it, and unfolding it later connects afresh.
+    setHsExpanded(hsPrev => without(hsPrev, strId));
+    setHsMounted(hsPrev => without(hsPrev, strId));
+    setDicStatus(dicPrev => ({ ...dicPrev, [strId]: 'idle' }));
+  }, [objLink]);
+
+  /** Right-click on a connection row. */
+  const menuItems = (strId: string): MenuItem[] => {
+    const objConnection = arrConnections.find(objItem => objItem.id === strId);
+    if (!objConnection) return [];
+    const strStatus = dicTabStatus[strId] ?? dicStatus[strId] ?? 'idle';
+    return [
+      { kind: 'header', label: objConnection.name },
+      // Unfolding mounts the tree, which connects; a tree that already failed tries again.
+      { label: 'Connect', disabled: strStatus === 'ok' || strStatus === 'loading',
+        onSelect: () => { if (hsMounted.has(strId)) retry(strId); expand(strId); onSelect(strId); } },
+      { label: 'Disconnect', disabled: strStatus === 'idle', onSelect: () => onDisconnect(strId) },
+      { kind: 'separator' },
+      { label: 'New SQL tab', icon: <IconPlus intSize={14} />, onSelect: () => { expand(strId); onNewTab(strId); } },
+      { label: 'Refresh', icon: <IconRefresh intSize={14} />, disabled: !hsMounted.has(strId), onSelect: () => retry(strId) },
+      { kind: 'separator' },
+      { label: 'Edit connection…', icon: <IconPencil intSize={14} />, onSelect: () => onEdit(objConnection) },
+      { label: 'Delete connection', icon: <IconTrash intSize={14} />, danger: true, onSelect: () => onDelete(objConnection) },
+    ];
   };
 
   // The connection of the active tab opens by itself.
@@ -102,6 +146,8 @@ export function ConnectionList({
         )}
       </div>
 
+      {objMenu && <ContextMenu intX={objMenu.x} intY={objMenu.y} arrItems={menuItems(objMenu.id)} onClose={() => setObjMenu(null)} />}
+
       {strError && (
         <p className="m-3 rounded border border-danger/40 p-2 text-danger">
           Can't reach the local API: {strError}
@@ -117,7 +163,7 @@ export function ConnectionList({
             const boolExpanded = hsExpanded.has(strId);
             const boolOpen = hsOpenIds.has(strId);
             const Chevron = boolExpanded ? IconChevronDown : IconChevronRight;
-            const strStatus = dicStatus[strId] ?? 'idle';
+            const strStatus = dicTabStatus[strId] ?? dicStatus[strId] ?? 'idle';
             return (
               <section key={strId} aria-label={objConnection.name}>
                 {/* h-9 = TREE_STICKY_TOP: stays on top while its own tree scrolls under it */}
@@ -132,6 +178,7 @@ export function ConnectionList({
                     if (objEvent.key === 'ArrowLeft') setHsExpanded(hsPrev => without(hsPrev, strId));
                   }}
                   onDoubleClick={() => onEdit(objConnection)}
+                  onContextMenu={objEvent => { objEvent.preventDefault(); setObjMenu({ x: objEvent.clientX, y: objEvent.clientY, id: strId }); }}
                   title={`Name: ${objConnection.name}\n${KIND_LABEL[objConnection.kind]}: ${objConnection.host}:${objConnection.port}${objConnection.database ? `/${objConnection.database}` : ''}${objConnection.username ? `\nUser: ${objConnection.username}` : ''}`}
                   className={`group sticky top-0 z-20 flex h-9 items-center gap-1.5 pl-1.5 pr-1.5 ${boolActive ? 'bg-panel' : 'bg-bg'} hover:bg-hover`}
                   style={{ boxShadow: `inset 3px 0 0 ${boolActive || objConnection.color !== 'slate' ? envVar(objConnection.color) : 'transparent'}` }}
@@ -141,27 +188,22 @@ export function ConnectionList({
                     onDoubleClick={objEvent => objEvent.stopPropagation()}>
                     <Chevron intSize={14} />
                   </button>
-                  <KindIcon strKind={objConnection.kind} intSize={17} boolMuted={!boolOpen && !boolExpanded} />
+                  <KindIcon strKind={objConnection.kind} intSize={17} boolMuted={strStatus !== 'ok'} />
                   <span className={`shrink-0 truncate ${boolOpen ? 'font-semibold' : 'font-medium'}`} style={{ maxWidth: '60%' }}>{objConnection.name}</span>
                   <span className="min-w-0 flex-1 truncate text-[11px] italic text-muted">{objConnection.host}:{objConnection.port}</span>
-                  <span className="h-2 w-2 shrink-0 rounded-full group-hover:hidden" title={STATUS_LABEL[strStatus]}
+                  {/* Reload and Edit show on hover; Delete / Disconnect live in the right-click menu */}
+                  {boolExpanded && (
+                    <button className="icon-btn icon-btn-sm hidden group-hover:inline-flex group-focus-within:inline-flex" aria-label={`Refresh ${objConnection.name}`}
+                      title="Connect again and reload the list" onClick={objEvent => { objEvent.stopPropagation(); retry(strId); }}>
+                      <IconRefresh intSize={14} />
+                    </button>
+                  )}
+                  <button className="icon-btn icon-btn-sm hidden group-hover:inline-flex group-focus-within:inline-flex" aria-label={`Edit ${objConnection.name}`}
+                    title="Edit connection" onClick={objEvent => { objEvent.stopPropagation(); onEdit(objConnection); }}>
+                    <IconPencil intSize={14} />
+                  </button>
+                  <span className="mx-1 h-2 w-2 shrink-0 rounded-full" title={STATUS_LABEL[strStatus]}
                     style={{ background: STATUS_COLOR[strStatus], opacity: strStatus === 'idle' ? 0.45 : 1 }} />
-                  <div className="hidden gap-0.5 group-hover:flex group-focus-within:flex">
-                    {boolExpanded && (
-                      <button className="icon-btn icon-btn-sm" aria-label={`Refresh ${objConnection.name}`} title="Connect again and reload the list"
-                        onClick={objEvent => { objEvent.stopPropagation(); retry(strId); }}>
-                        <IconRefresh intSize={14} />
-                      </button>
-                    )}
-                    <button className="icon-btn icon-btn-sm" aria-label={`Edit ${objConnection.name}`} title="Edit"
-                      onClick={objEvent => { objEvent.stopPropagation(); onEdit(objConnection); }}>
-                      <IconPencil intSize={14} />
-                    </button>
-                    <button className="icon-btn icon-btn-sm hover:text-danger" aria-label={`Delete ${objConnection.name}`} title="Delete"
-                      onClick={objEvent => { objEvent.stopPropagation(); onDelete(objConnection); }}>
-                      <IconTrash intSize={14} />
-                    </button>
-                  </div>
                 </div>
 
                 {hsMounted.has(strId) && (

@@ -26,15 +26,20 @@ export const IconDownload = icon(<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5
 export const IconFilter = icon(<path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 1.8v-7.2z" />);
 export const IconStop = icon(<rect x="6" y="6" width="12" height="12" rx="2" />, true);
 export const IconHistory = icon(<><path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5L4.5 8.5M4.5 4.5v4h4" /><path d="M12 8v4.5l3 1.8" /></>);
-export const IconFormat = icon(<path d="M4 6h16M4 10.5h9M8 15h12M8 19.5h7" />);
-export const IconComment = icon(<path d="M10.5 5 6.5 19M17.5 5l-4 14" />);
+// Indent: lines pushed in by an arrow.
+export const IconFormat = icon(<path d="M4 5.5h16M11 10h9M11 14h9M4 18.5h16M4 9.5l3.5 2.5L4 14.5" />);
+// "// text": two slashes and the line they comment out.
+export const IconComment = icon(<path d="M6.5 6 3.5 18M11 6 8 18M14 9.5h7M14 14.5h5" />);
 export const IconCheck = icon(<path d="M5 12.5 9.5 17 19 7.5" />);
 export const IconUndo = icon(<path d="M8 5 4 9l4 4M4 9h10a5 5 0 0 1 0 10H9" />);
+export const IconRedo = icon(<path d="M16 5l4 4-4 4M20 9H10a5 5 0 0 0 0 10h5" />);
 export const IconPlug = icon(<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4" />);
 export const IconUnplug = icon(<path d="M9 3v3M15 3v5M18 8v3a6 6 0 0 1-.6 2.6M14.6 16.4A6 6 0 0 1 6 11V8h1M12 17v4M4 4l16 16" />);
 export const IconRefresh = icon(<path d="M20 11a8 8 0 0 0-14.3-4.3L4 8.5M4 4v4.5h4.5M4 13a8 8 0 0 0 14.3 4.3L20 15.5M20 20v-4.5h-4.5" />);
 export const IconPlus = icon(<path d="M12 5v14M5 12h14" />);
 export const IconClose = icon(<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />);
+export const IconEye = icon(<><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.8" /></>);
+export const IconEyeOff = icon(<path d="M4 4l16 16M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-3 3.7M6.3 7.6A16 16 0 0 0 2.5 12s3.5 6.5 9.5 6.5a9.5 9.5 0 0 0 4-.9M9.9 9.9a3 3 0 0 0 4.2 4.2" />);
 export const IconPencil = icon(<path d="M4 20l4.2-1L19.5 7.7a1.6 1.6 0 0 0 0-2.2l-1-1a1.6 1.6 0 0 0-2.2 0L5 15.8z" />);
 export const IconTrash = icon(<path d="M4.5 7h15M10 7V4.5h4V7M6.5 7l1 12.5h9l1-12.5M10 11v5M14 11v5" />);
 export const IconDuplicate = icon(<><rect x="8.5" y="8.5" width="11" height="11" rx="2" /><path d="M5.5 15.5h-1v-11h11v1" /></>);
@@ -49,6 +54,7 @@ export const IconSearch = icon(<><circle cx="11" cy="11" r="6" /><path d="m15.5 
 export const IconSidebar = icon(<><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M9.5 4.5v15" /></>);
 export const IconChevronRight =icon(<path d="m9.5 6 6 6-6 6" />);
 export const IconChevronDown = icon(<path d="m6 9.5 6 6 6-6" />);
+export const IconChevronUp = icon(<path d="m6 14.5 6-6 6 6" />);
 
 // ---- objects ----
 export const IconDatabase = icon(

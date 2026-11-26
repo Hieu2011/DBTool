@@ -72,6 +72,9 @@ input, select, textarea { user-select: text; }
 /* Editor: a table / routine name under the mouse while Ctrl is held (Ctrl + click opens it). */
 .monaco-editor .dbstudio-link { color: var(--accent) !important; text-decoration: underline; text-underline-offset: 3px; cursor: pointer !important; }
 
+/* Edge draws its own "reveal password" eye and clear cross inside inputs: the app has its own. */
+input::-ms-reveal, input::-ms-clear { display: none; }
+
 @layer components {
 .field {
   width: 100%;

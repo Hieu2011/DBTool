@@ -3,7 +3,7 @@ import { api, ApiError } from '../api';
 import type { Connection, ConnectionInput, DbKind } from '../types';
 import { DEFAULT_PORT, KIND_LABEL } from '../types';
 import { ENV_COLORS, envVar } from '../envColor';
-import { IconCheck, IconClose, KindIcon } from './icons';
+import { IconCheck, IconClose, IconEye, IconEyeOff, KindIcon } from './icons';
 
 export type DialogState = null | { mode: 'new' } | { mode: 'edit'; connection: Connection };
 
@@ -38,6 +38,7 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
   const [strBusy, setStrBusy] = useState<'test' | 'save' | null>(null);
   const [objMessage, setObjMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [intSeconds, setIntSeconds] = useState(0);
+  const [boolShowPassword, setBoolShowPassword] = useState(false);
 
   // Seconds on screen while a test runs (the server gives up after 20 s).
   useEffect(() => {
@@ -155,10 +156,18 @@ export function ConnectionDialog({ objState, onClose, onSaved }: Props) {
             onChange={objEvent => set('username', objEvent.target.value)} />
 
           <label htmlFor="c-pass" className="text-muted">Password</label>
-          <input id="c-pass" className="field" type="password" autoComplete="new-password"
-            value={objForm.password ?? ''}
-            placeholder={objState.mode === 'edit' && objState.connection.hasPassword ? 'Leave empty to keep the saved one' : ''}
-            onChange={objEvent => set('password', objEvent.target.value)} />
+          <div className="relative">
+            <input id="c-pass" className="field pr-9" type={boolShowPassword ? 'text' : 'password'} autoComplete="new-password" spellCheck={false}
+              value={objForm.password ?? ''}
+              placeholder={objState.mode === 'edit' && objState.connection.hasPassword ? 'Leave empty to keep the saved one' : ''}
+              onChange={objEvent => set('password', objEvent.target.value)} />
+            {/* Shows what is typed here. The saved password never leaves the server, so there is nothing to show for it. */}
+            <button type="button" className="icon-btn icon-btn-sm absolute right-1.5 top-1/2 -translate-y-1/2" onClick={() => setBoolShowPassword(boolPrev => !boolPrev)}
+              aria-label={boolShowPassword ? 'Hide the password' : 'Show the password'} aria-pressed={boolShowPassword}
+              title={boolShowPassword ? 'Hide the password' : 'Show the password being typed'}>
+              {boolShowPassword ? <IconEyeOff intSize={15} /> : <IconEye intSize={15} />}
+            </button>
+          </div>
 
           <label htmlFor="c-extra" className="text-muted">Driver options</label>
           <input id="c-extra" className="field font-mono text-xs" value={objForm.extra ?? ''}
