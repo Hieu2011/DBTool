@@ -376,6 +376,10 @@ export default function App() {
 
   // ---- disconnect a connection: its tabs close their sessions, the sidebar folds it and forgets its tree ----
   const [dicDisconnect, setDicDisconnect] = useState<Record<string, number>>({});
+  // Raised when the sidebar tree of a connection loads: its tabs with a failed session try again.
+  const [dicReconnect, setDicReconnect] = useState<Record<string, number>>({});
+  const reconnectTabs = useCallback((strConnectionId: string) =>
+    setDicReconnect(dicPrev => ({ ...dicPrev, [strConnectionId]: (dicPrev[strConnectionId] ?? 0) + 1 })), []);
   const [objLink, setObjLink] = useState<{ id: string; connected: boolean; serial: number } | null>(null);
   const disconnectConnection = useCallback((strConnectionId: string) => {
     const boolTransaction = refSession.current.arrTabs.some(objTab => objTab.connectionId === strConnectionId && refTxTabIds.current.has(objTab.id));
@@ -590,6 +594,7 @@ export default function App() {
         boolHidden={!boolSidebarOpen}
         objLink={objLink}
         onDisconnect={disconnectConnection}
+        onTreeConnected={reconnectTabs}
         onNewTab={strId => newQueryTab(strId)}
         dicTabStatus={dicTabStatus}
         renderTree={(objConnection, boolActive, objControl) => {
@@ -738,6 +743,7 @@ export default function App() {
                 onOpenSql={(strSql, boolAutoRun) => newQueryTab(objConnection.id, strSql, boolAutoRun)}
                 onExecute={() => openObject(objConnection.id, objTab.object, 'routine')}
                 onDirtyChange={boolDirty => markSource(objTab.id, boolDirty)}
+                loadMetadata={loadMetadata}
                 objMetadata={dicMetadata[objConnection.id]}
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 onRenamed={strNewName => setArrTabs(arrPrev => arrPrev.map(objItem => (objItem.id === objTab.id && objItem.kind === 'object'
@@ -759,11 +765,13 @@ export default function App() {
                 onTransactionChange={trackTransaction}
                 onHandle={registerEditor}
                 onContentChange={markDirty}
+                onOpenSql={strSql => newQueryTab(objConnection.id, strSql, false)}
                 onOpenObject={objObject => openObject(objConnection.id, objObject)}
                 strInitialSql={objTab.initialSql}
                 boolAutoRun={objTab.autoRun}
                 boolWordWrap={boolWordWrap}
                 intDisconnect={dicDisconnect[objConnection.id] ?? 0}
+                intReconnect={dicReconnect[objConnection.id] ?? 0}
                 onDisconnect={disconnectConnection}
                 onSessionState={trackSession}
                 onToggleWordWrap={toggleWordWrap}

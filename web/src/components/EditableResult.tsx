@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import {
-  binaryHex, buildDeletes, buildInserts, buildUpdates, cellKey, editTargets, isBinaryType, keyGeneratorSql, looksLikeSelect, rowEditable, rowIdTargets, type EditTarget, type RowUpdate,
+  binaryHex, buildDeletes, buildInserts, buildUpdates, cellKey, editTargets, isBinaryType, keyGeneratorSql, looksLikeSelect, primaryKeySql, rowEditable, rowIdTargets, type EditTarget, type RowUpdate,
 } from '../sql/editData';
 import { buildMongoStatements, mongoTarget } from '../sql/mongoEdit';
 import { mapColumns, parseSelect, rowIdSql, ROWID_ALIAS, type FromItem, type ParsedSelect } from '../sql/oracleEdit';
 import type { Connection, QueryResult, SchemaMetadata } from '../types';
 import { IconDownload, IconDuplicate, IconFirst, IconLast, IconNext, IconPencil, IconPlus, IconPrev, IconRefresh, IconSave, IconTrash, IconUndo } from './icons';
-import { display, ResultGrid, type GridCommand, type GridEdit } from './ResultGrid';
+import { display, ResultGrid, type GridBlock, type GridCommand, type GridEdit } from './ResultGrid';
 import { RecordView, TextView } from './ResultViews';
+import { ContextMenu, type MenuItem } from './ContextMenu';
+import { generateScript, type ScriptKind, type ScriptSource } from '../sql/generateScript';
+import { showToast } from '../toast';
 
 interface Props {
   objConnection: Connection;
@@ -23,6 +26,8 @@ interface Props {
   /** Statements were sent on the tab's session (it may now hold an open transaction). */
   onRan?: () => void;
   strExportName?: string;
+  /** Generate script as... > To SQL tab: opens a new editor tab holding the script. */
+  onOpenSql?: (strSql: string) => void;
 }
 
 type EditState =
@@ -66,7 +71,13 @@ function columnsFrom(objMeta: SchemaMetadata, objItem: FromItem) {
  * key (the driver says where each column comes from); Oracle by ROWID, as dbForge does: the statement's own FROM
  * clause gives the tables, and it is run again with the chosen table's ROWID when the first change needs it.
  */
-export function EditableResult({ objConnection, strSql, objResult, strSessionId, boolAutoCommit = true, intMaxRows = 1000, onRan, strExportName }: Props) {
+export function EditableResult({ objConnection, strSql, objResult, strSessionId, boolAutoCommit = true, intMaxRows = 1000, onRan, strExportName, onOpenSql }: Props) {
+  // Right-click on the grid: where, and the cell under the pointer.
+  const [objMenu, setObjMenu] = useState<{ x: number; y: number; row: number | null; col: number | null } | null>(null);
+  // The block of cells picked in the grid (drag, Shift + click / arrows).
+  const [objBlock, setObjBlock] = useState<GridBlock | null>(null);
+  // Oracle: primary key columns looked up in the catalog, once per table (null: the lookup failed).
+  const refKeys = useRef(new Map<string, Promise<string[] | null>>());
   const [objEdit, setObjEdit] = useState<EditState>({ status: 'loading' });
   const [strTarget, setStrTarget] = useState<string | null>(null);
   const [objReloaded, setObjReloaded] = useState<Reloaded | null>(null);
@@ -254,8 +265,9 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
   // ---- rows ----
   /** The selected rows in grid order. */
   // Whole rows picked by their number; with none, the row of the current cell is the one the row buttons act on.
-  const arrPicked = useMemo(() => (hsRows.size > 0 ? [...hsRows] : intCurrent === null ? [] : [intCurrent])
-    .filter(intRow => intRow < objGrid.rows.length).sort((intA, intB) => intA - intB), [hsRows, intCurrent, objGrid]);
+  // A block of cells counts as its rows.
+  const arrPicked = useMemo(() => (hsRows.size > 0 ? [...hsRows] : objBlock ? objBlock.rows : intCurrent === null ? [] : [intCurrent])
+    .filter(intRow => intRow < objGrid.rows.length).sort((intA, intB) => intA - intB), [hsRows, objBlock, intCurrent, objGrid]);
 
   const addRow = async () => {
     if (!objTarget) return;
@@ -442,6 +454,92 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
     }
   };
 
+  // ---- generate script as (right-click) ----
+  const boolScripts = objConnection.kind === 'PostgreSql' || objConnection.kind === 'Oracle';
+  // The table being edited, else the first table the statement names.
+  const strScriptTable = objTarget?.tableSql ?? (objEdit.status === 'on' ? objEdit.parsed?.from.find(objItem => !objItem.subquery)?.ref : undefined)
+    ?? /\bfrom\s+((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strSql)?.[1] ?? 'table_name';
+  // Result column -> table column: the table's own columns when it is known, else every column by its name.
+  const dicScriptNames = objTarget?.columns ?? new Map(objShown.columns.map((objColumn, intCol) => [intCol, objColumn.name] as [number, string]));
+
+  /** Oracle rows are found by ROWID, so the grid does not know the primary key: the catalog does. */
+  const loadKeys = (): Promise<string[] | null> => {
+    if (objConnection.kind !== 'Oracle' || (objTarget && !objTarget.byRowId)) return Promise.resolve(null);
+    let objPending = refKeys.current.get(strScriptTable);
+    if (!objPending) {
+      objPending = api.query(crypto.randomUUID(), objConnection.id, primaryKeySql(strScriptTable), 50)
+        .then(objFound => objFound.rows.map(arrRow => String(arrRow[0])), () => null);
+      refKeys.current.set(strScriptTable, objPending);
+    }
+    return objPending;
+  };
+
+  /** The result columns of the primary key, or why they are not known. */
+  const scriptKeys = async (): Promise<{ keys: number[]; keyNote?: string }> => {
+    if (objTarget && !objTarget.byRowId) return { keys: objTarget.keyIndexes.map(arrIndexes => arrIndexes[0]) };
+    if (objConnection.kind !== 'Oracle') return { keys: [], keyNote: `The primary key of ${strScriptTable} is not known (the result is read-only)` };
+    const arrNames = await loadKeys();
+    if (!arrNames) return { keys: [], keyNote: `The primary key of ${strScriptTable} could not be read` };
+    if (arrNames.length === 0) return { keys: [], keyNote: `${strScriptTable} has no primary key` };
+    const arrKeys = arrNames.map(strKey => [...dicScriptNames].find(([, strColumn]) => strColumn.replace(/^"|"$/g, '').toUpperCase() === strKey.toUpperCase())?.[0] ?? -1);
+    return arrKeys.includes(-1)
+      ? { keys: [], keyNote: `The primary key of ${strScriptTable} (${arrNames.join(', ')}) is not in this result` }
+      : { keys: arrKeys };
+  };
+
+  const scriptItems = (): MenuItem[] => {
+    if (!objMenu) return [];
+    const { row: intRow, col: intCol } = objMenu;
+    const arrAll = [...dicScriptNames.keys()];
+    const boolInBlock = !!objBlock && intRow !== null && intCol !== null && objBlock.rows.includes(intRow) && objBlock.cols.includes(intCol);
+    // What is selected, as dbForge reads it: a block of cells (its columns only), whole rows (every column),
+    // or just the cell under the pointer (its row; WHERE is about its column).
+    let arrRows: number[];
+    let arrCols = arrAll;
+    let arrWhere = arrAll;
+    if (boolInBlock) {
+      arrRows = objBlock!.rows;
+      arrCols = arrWhere = objBlock!.cols.filter(intItem => dicScriptNames.has(intItem));
+    } else if (hsRows.size > 0 && (intRow === null || hsRows.has(intRow))) {
+      arrRows = arrPicked;
+    } else {
+      arrRows = intRow !== null ? [intRow] : arrPicked;
+      if (intCol !== null && dicScriptNames.has(intCol)) arrWhere = [intCol];
+    }
+    arrRows = arrRows.filter(intItem => intItem < intBase); // rows not saved yet are left out
+
+    const strFile = strScriptTable.replace(/"/g, '').split('.').pop() || 'script';
+    const destinations = (strScript: ScriptKind): MenuItem[] => {
+      const text = async () => {
+        const objBase: ScriptSource = {
+          kind: objConnection.kind, result: objShown, rows: arrRows, table: strScriptTable, names: dicScriptNames,
+          cols: strScript === 'insert' || strScript === 'update' ? arrCols : arrWhere, keys: [],
+        };
+        return generateScript(strScript, strScript === 'update' ? { ...objBase, ...(await scriptKeys()) } : objBase);
+      };
+      const failed = (objEx: unknown) => showToast('error', 'The script could not be written', errorMessage(objEx));
+      return [
+        { label: 'To SQL tab', disabled: !onOpenSql, onSelect: () => { text().then(strText => onOpenSql?.(strText), failed); } },
+        // The server's Save dialog picks the path.
+        { label: 'To file…', onSelect: () => { text().then(strText => api.saveSqlFile(null, `${strFile}-${strScript.toLowerCase()}.sql`, strText))
+          .then(objSaved => { if (objSaved) showToast('success', 'Script saved', objSaved.path); }, failed); } },
+        { label: 'To clipboard', onSelect: () => { text().then(strText => navigator.clipboard.writeText(strText))
+          .then(() => showToast('success', `Script of ${plural(arrRows.length, 'row')} copied`), failed); } },
+      ];
+    };
+    const boolNone = arrRows.length === 0 || arrCols.length === 0;
+    return [
+      { kind: 'header', label: `${strScriptTable} · ${plural(arrRows.length, 'row')}${arrCols.length < arrAll.length ? ` × ${plural(arrCols.length, 'column')}` : ''}` },
+      { label: 'Generate script as', disabled: boolNone, items: [
+        { label: 'INSERT', items: destinations('insert') },
+        // One column only, like dbForge: several columns have no single IN list.
+        { label: 'WHERE IN ()', disabled: arrWhere.length !== 1, items: destinations('whereIn') },
+        { label: 'WHERE AND OR', disabled: arrWhere.length === 0, items: destinations('whereAndOr') },
+        { label: 'UPDATE', items: destinations('update') },
+      ] },
+    ];
+  };
+
   // ---- text ----
   const strStatus = objEdit.status === 'loading' ? 'Checking which table each column comes from…'
     : objEdit.status === 'unavailable' ? `Read-only: ${objEdit.message}`
@@ -476,10 +574,18 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
             </button>
           ))}
         </div>
-        <div className="min-h-0 min-w-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1" onContextMenu={objEvent => {
+          if (!boolScripts || strView !== 'grid') return;
+          objEvent.preventDefault();
+          // data-cell = "row:col" on every grid cell
+          const arrCell = (objEvent.target as Element).closest?.('[data-cell]')?.getAttribute('data-cell')?.split(':').map(Number);
+          setObjMenu({ x: objEvent.clientX, y: objEvent.clientY, row: arrCell?.[0] ?? null, col: arrCell?.[1] ?? null });
+          void loadKeys(); // ready by the time UPDATE is picked
+        }}>
+          {objMenu && <ContextMenu intX={objMenu.x} intY={objMenu.y} arrItems={scriptItems()} onClose={() => setObjMenu(null)} />}
           {strView === 'grid' && (
             <ResultGrid objResult={objGrid} strExportName={strExportName} objEdit={objGridEdit} hsRows={hsRows} onRows={setHsRows} onSelectRow={setIntCurrent} objReveal={objReveal}
-              objCommand={objCommand} boolNoExport />
+              objCommand={objCommand} boolNoExport onBlock={setObjBlock} />
           )}
           {strView === 'text' && <TextView objResult={objGrid} arrRows={arrTextRows} />}
           {strView === 'record' && <RecordView objResult={objGrid} arrRows={arrRecordRows} />}

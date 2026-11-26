@@ -25,6 +25,9 @@ interface SortState { col: number; desc: boolean }
 /** Asked from a toolbar outside the grid; it works on the rows as shown (filter, sort). */
 export type GridCommand = 'first' | 'prev' | 'next' | 'last' | 'edit' | 'xlsx' | 'csv';
 
+/** A rectangle of cells picked by dragging or Shift: rows in the order shown, columns left to right. */
+export interface GridBlock { rows: number[]; cols: number[] }
+
 /** Cell editing, driven by the owner of the result (EditableResult). Changes are keyed `row:col`. */
 export interface GridEdit {
   /** Per column: can its cells be edited. */
@@ -59,9 +62,21 @@ interface Props {
   objCommand?: { name: GridCommand } | null;
   /** The owner has its own export button. */
   boolNoExport?: boolean;
+  /** The block of cells changed (null: none, a single cell is not a block). */
+  onBlock?: (objBlock: GridBlock | null) => void;
 }
 
-export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsRows, onRows, objReveal, objCommand, boolNoExport }: Props) {
+export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsRows, onRows, objReveal, objCommand, boolNoExport, onBlock }: Props) {
+  // A block of cells: from the cell where the drag / Shift started (a) to where it is now (b). Rows by their index in objResult.rows.
+  const [objBlock, setObjBlock] = useState<{ a: { r: number; c: number }; b: { r: number; c: number } } | null>(null);
+  const refDrag = useRef<{ r: number; c: number } | null>(null);
+  const refOnBlock = useRef(onBlock);
+  refOnBlock.current = onBlock;
+  useEffect(() => {
+    const endDrag = () => { refDrag.current = null; };
+    window.addEventListener('mouseup', endDrag);
+    return () => window.removeEventListener('mouseup', endDrag);
+  }, []);
   const refEditBox = useRef<HTMLInputElement>(null);
   const refPickerOpen = useRef(false);
   const [hsInner, setHsInner] = useState<Set<number>>(new Set());
@@ -120,6 +135,22 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     for (let intRow = intBase; intRow < objResult.rows.length; intRow++) arrIndexes.push(intRow);
     return arrIndexes;
   }, [objResult, arrNumeric, objSort, boolFilters, dicFilters, intBase]);
+
+  // The block as shown: the rows between its two ends in the current order.
+  const objArea = useMemo(() => {
+    if (!objBlock) return null;
+    const intA = arrView.indexOf(objBlock.a.r);
+    const intB = arrView.indexOf(objBlock.b.r);
+    if (intA < 0 || intB < 0) return null;
+    const arrRows = arrView.slice(Math.min(intA, intB), Math.max(intA, intB) + 1);
+    const intFirst = Math.min(objBlock.a.c, objBlock.b.c);
+    const intLast = Math.max(objBlock.a.c, objBlock.b.c);
+    return { rows: arrRows, hsRows: new Set(arrRows), first: intFirst, last: intLast };
+  }, [objBlock, arrView]);
+  useEffect(() => {
+    refOnBlock.current?.(objArea ? { rows: objArea.rows, cols: Array.from({ length: objArea.last - objArea.first + 1 }, (_, intAt) => objArea.first + intAt) } : null);
+  }, [objArea]);
+  const inBlock = (intRow: number, intCol: number) => !!objArea && objArea.hsRows.has(intRow) && intCol >= objArea.first && intCol <= objArea.last;
 
   const intTotalWidth = INDEX_W + arrWidths.reduce((intSum, intWidth) => intSum + intWidth, 0);
   const boolFiltered = arrView.length !== objResult.rows.length;
@@ -192,6 +223,13 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
 
   const selectRows = (hsNext: Set<number>) => { setHsInner(hsNext); onRows?.(hsNext); };
 
+  /** Stretches the block to this cell, from where it started (or from the current cell). Whole-row selection ends. */
+  const blockTo = (intRow: number, intCol: number, objFrom?: { r: number; c: number }) => {
+    const objStart = objFrom ?? objBlock?.a ?? objSelected ?? { r: intRow, c: intCol };
+    setObjBlock(objStart.r === intRow && objStart.c === intCol ? null : { a: objStart, b: { r: intRow, c: intCol } });
+    if (hsPicked.size > 0) selectRows(new Set());
+  };
+
   /** Click: that row. Ctrl: add / remove it. Shift: the range from the last plain click, in the order shown. */
   const pickRow = (intRow: number, objKeys: { ctrlKey: boolean; shiftKey: boolean }) => {
     if (objKeys.shiftKey && refAnchor.current !== null) {
@@ -216,12 +254,15 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
   const onKey = (objEvent: React.KeyboardEvent) => {
     if (objEvent.target instanceof HTMLInputElement) return; // filter and cell boxes handle their own keys
     if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'a') {
+      setObjBlock(null);
       selectRows(new Set(arrView));
       return objEvent.preventDefault();
     }
     if (objEvent.ctrlKey && objEvent.key.toLowerCase() === 'c') {
-      // Several rows: tab-separated lines. Else the cell.
-      const strText = hsPicked.size > 1
+      // A block: its cells. Several rows: tab-separated lines. Else the cell.
+      const strText = objArea
+        ? objArea.rows.map(intRow => Array.from({ length: objArea.last - objArea.first + 1 }, (_, intAt) => display(valueAt(intRow, objArea.first + intAt))).join('\t')).join('\n')
+        : hsPicked.size > 1
         ? arrView.filter(intRow => hsPicked.has(intRow)).map(intRow => objResult.columns.map((_, intCol) => display(valueAt(intRow, intCol))).join('\t')).join('\n')
         : objSelected ? display(valueAt(objSelected.r, objSelected.c)) : null;
       if (strText === null) return;
@@ -238,6 +279,18 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
     const arrStep = ({ ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] } as Record<string, number[]>)[objEvent.key];
     if (!arrStep) return;
     objEvent.preventDefault();
+    if (objEvent.shiftKey) {
+      // Shift + arrows grow the block from the current cell; the current cell stays where it is.
+      const objEnd = objBlock?.b ?? objSelected;
+      const intEndAt = arrView.indexOf(objEnd.r);
+      if (intEndAt < 0) return;
+      const intEndView = Math.min(Math.max(intEndAt + arrStep[0], 0), arrView.length - 1);
+      const intEndCol = Math.min(Math.max(objEnd.c + arrStep[1], 0), objResult.columns.length - 1);
+      blockTo(arrView[intEndView], intEndCol, objBlock?.a ?? objSelected);
+      if (arrStep[0] !== 0) objVirtual.scrollToIndex(intEndView);
+      return;
+    }
+    setObjBlock(null);
     const intView = Math.min(Math.max(intAt + arrStep[0], 0), arrView.length - 1);
     const intCol = Math.min(Math.max(objSelected.c + arrStep[1], 0), objResult.columns.length - 1);
     const intRow = arrView[intView];
@@ -342,7 +395,7 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                 className={`absolute left-0 flex w-full border-b border-line/60 ${
                   boolDeleted ? 'bg-danger/15 line-through' : boolNew ? 'bg-success/15' : boolPicked ? 'bg-accent/25 shadow-[inset_0_1px_0_var(--accent),inset_0_-1px_0_var(--accent)]' : 'hover:bg-hover/60'}`}
                 style={{ height: ROW_H, transform: `translateY(${objItem.start}px)` }}>
-                <div style={{ width: INDEX_W }} onClick={objEvent => { setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
+                <div style={{ width: INDEX_W }} onClick={objEvent => { setObjBlock(null); setObjSelected(objPrev => ({ r: intRow, c: objPrev?.c ?? 0 })); pickRow(intRow, objEvent); onSelectRow?.(intRow); }}
                   title={boolDeleted ? 'Will be deleted on Save' : boolNew ? 'New row, inserted on Save' : 'Click to select the row (Ctrl / Shift for several)'}
                   className={`shrink-0 cursor-pointer border-r border-line px-2 text-right leading-7 ${
                     boolDeleted ? 'font-semibold text-danger' : boolNew ? 'font-semibold text-success' : boolPicked ? 'bg-accent font-semibold text-accent-fg' : 'text-muted'}`}>
@@ -385,10 +438,34 @@ export function ResultGrid({ objResult, onSelectRow, strExportName, objEdit, hsR
                   }
                   return (
                     <div key={intCol} style={{ width: arrWidths[intCol] }} data-cell={strCell}
-                      onClick={objEvent => { setObjSelected({ r: intRow, c: intCol }); pickCell(intRow, objEvent); onSelectRow?.(intRow); }}
+                      onMouseDown={objEvent => {
+                        if (objEvent.button !== 0 || objEvent.ctrlKey || objEvent.shiftKey) return;
+                        refDrag.current = { r: intRow, c: intCol };
+                        setObjBlock(null);
+                      }}
+                      // Dragging over other cells stretches a block from the cell where the button went down.
+                      onMouseEnter={objEvent => {
+                        const objFrom = refDrag.current;
+                        if (!objFrom || !(objEvent.buttons & 1) || (objFrom.r === intRow && objFrom.c === intCol && !objBlock)) return;
+                        setObjSelected(objFrom);
+                        blockTo(intRow, intCol, objFrom);
+                      }}
+                      onClick={objEvent => {
+                        // Shift + click: the block from the current cell to this one.
+                        if (objEvent.shiftKey && !objEvent.ctrlKey && objSelected) return blockTo(intRow, intCol);
+                        setObjSelected({ r: intRow, c: intCol }); pickCell(intRow, objEvent); onSelectRow?.(intRow);
+                      }}
+                      // Right-click outside what is selected moves the selection there first.
+                      onContextMenu={() => {
+                        if (inBlock(intRow, intCol) || hsPicked.has(intRow)) return;
+                        setObjBlock(null);
+                        setObjSelected({ r: intRow, c: intCol });
+                        if (hsPicked.size > 0) selectRows(new Set());
+                        onSelectRow?.(intRow);
+                      }}
                       onDoubleClick={() => { beginEdit(intRow, intCol); }}
                       className={`shrink-0 truncate border-r border-line/60 px-2.5 leading-7 ${arrNumeric[intCol] ? 'text-right' : ''} ${
-                        boolSelected ? 'bg-accent/15 outline outline-1 -outline-offset-1 outline-accent' : ''} ${
+                        boolSelected ? 'bg-accent/15 outline outline-1 -outline-offset-1 outline-accent' : inBlock(intRow, intCol) ? 'bg-accent/25' : ''} ${
                         boolChanged ? 'bg-env-amber/25 font-semibold' : ''} ${objEdit && !objEdit.arrEditable[intCol] ? 'text-muted' : ''} ${boolCanEdit ? 'cursor-cell' : ''}`}>
                       {objValue === null || objValue === undefined ? <span className="text-muted italic">{boolNew && boolCanEdit ? 'default' : 'NULL'}</span> : display(objValue)}
                     </div>

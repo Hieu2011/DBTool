@@ -91,6 +91,17 @@ FROM k JOIN all_sequences s ON s.sequence_owner = ${strOwner}
 ORDER BY 5`;
 }
 
+/** Oracle: the primary key columns of a table, in key order. strTableSql: TABLE or OWNER.TABLE (no owner = the current schema). */
+export function primaryKeySql(strTableSql: string) {
+  const arrParts = strTableSql.split('.').map(strPart => (strPart.startsWith('"') ? strPart.slice(1, -1) : strPart.toUpperCase()).replace(/'/g, "''"));
+  const strOwner = arrParts.length > 1 ? `'${arrParts[0]}'` : `SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')`;
+  return `SELECT cc.column_name
+FROM all_constraints c
+JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+WHERE c.constraint_type = 'P' AND c.owner = ${strOwner} AND c.table_name = '${arrParts[arrParts.length - 1]}'
+ORDER BY cc.position`;
+}
+
 /** `row:col` of a cell in the changes map. */
 export const cellKey = (intRow: number, intCol: number) => `${intRow}:${intCol}`;
 

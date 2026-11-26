@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Connection } from '../types';
 import { KIND_LABEL } from '../types';
 import { envVar } from '../envColor';
@@ -31,6 +31,8 @@ interface Props {
   /** Right-click menu: a new editor tab on the connection, and closing everything it has open. */
   onNewTab: (strId: string) => void;
   onDisconnect: (strId: string) => void;
+  /** The tree of a connection just loaded: tabs whose session had failed connect again. */
+  onTreeConnected: (strId: string) => void;
   intWidth: number;
   /** Hidden keeps the sidebar mounted, so the object trees keep what is open and loaded. */
   boolHidden: boolean;
@@ -49,7 +51,7 @@ const without = (hsSet: Set<string>, strId: string) => { const hsNext = new Set(
  * list scrolls as one (the trees virtualize their rows against this scroller, see useOuterScroll).
  */
 export function ConnectionList({
-  arrConnections, strActiveId, hsOpenIds, strError, onOpen, onSelect, onNew, onEdit, onDelete, onNewTab, onDisconnect, intWidth, boolHidden, objLink, dicTabStatus, renderTree,
+  arrConnections, strActiveId, hsOpenIds, strError, onOpen, onSelect, onNew, onEdit, onDelete, onNewTab, onDisconnect, onTreeConnected, intWidth, boolHidden, objLink, dicTabStatus, renderTree,
 }: Props) {
   const [hsExpanded, setHsExpanded] = useState<Set<string>>(new Set());
   // A tree stays mounted once shown: collapsing a connection must not drop what it loaded.
@@ -58,6 +60,15 @@ export function ConnectionList({
   const [dicRefresh, setDicRefresh] = useState<Record<string, number>>({});
   const [dicStatus, setDicStatus] = useState<Record<string, TreeStatus>>({});
   const [objFailure, setObjFailure] = useState<{ id: string; message: string; refresh: boolean } | null>(null);
+  // A tree got through (Retry) where a tab had failed: without this the tab's failure keeps the icon red.
+  const refTreeStatus = useRef<Record<string, TreeStatus>>({});
+  const refOnTreeConnected = useRef(onTreeConnected);
+  refOnTreeConnected.current = onTreeConnected;
+  useEffect(() => {
+    for (const [strId, strStatus] of Object.entries(dicStatus))
+      if (strStatus === 'ok' && refTreeStatus.current[strId] !== 'ok') refOnTreeConnected.current(strId);
+    refTreeStatus.current = dicStatus;
+  }, [dicStatus]);
   const retry = (strId: string) => setDicRefresh(dicPrev => ({ ...dicPrev, [strId]: (dicPrev[strId] ?? 0) + 1 }));
   const [objMenu, setObjMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const objFailed = objFailure ? arrConnections.find(objItem => objItem.id === objFailure.id) : undefined;

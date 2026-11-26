@@ -72,6 +72,25 @@ input, select, textarea { user-select: text; }
 /* Editor: a table / routine name under the mouse while Ctrl is held (Ctrl + click opens it). */
 .monaco-editor .dbstudio-link { color: var(--accent) !important; text-decoration: underline; text-underline-offset: 3px; cursor: pointer !important; }
 
+/* Hover cards of the editors (table, column, routine): small and tight, like dbForge. */
+.monaco-hover { border-radius: 6px !important; border: 1px solid var(--line) !important; background: var(--panel) !important;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); overflow: hidden; font-size: 12px !important; line-height: 18px !important; }
+.monaco-hover .hover-contents { padding: 3px 9px !important; }
+.monaco-hover .hover-contents p { margin: 0 !important; }
+.monaco-hover .hover-row:not(:first-child):not(:empty) { border-top: 1px solid var(--line) !important; }
+.monaco-hover table { border-collapse: collapse; margin: 1px 0; min-width: 100%; font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace; font-size: 12px; }
+.monaco-hover th { padding: 0 16px 1px 0; text-align: left; font-weight: 500; font-size: 11px; color: var(--muted); }
+.monaco-hover td { padding: 0 16px 0 0; white-space: nowrap; line-height: 17px; }
+.monaco-hover td:last-child, .monaco-hover th:last-child { padding-right: 2px; }
+/* Null / key column and comment: quiet. */
+.monaco-hover td:nth-child(3) { font-size: 11px; color: var(--accent); }
+.monaco-hover td:nth-child(4) { font-family: inherit; color: var(--muted); }
+.monaco-hover td strong { color: var(--accent); }
+/* type in green, NOT NULL / PRIMARY KEY in blue */
+.monaco-hover code { padding: 0 !important; background: transparent !important; color: #0E7C66; font-size: 12px; }
+.monaco-hover em { font-style: normal; font-size: 11px; color: var(--accent); }
+@media (prefers-color-scheme: dark) { .monaco-hover code { color: #6FD0B5; } }
+
 /* Edge draws its own "reveal password" eye and clear cross inside inputs: the app has its own. */
 input::-ms-reveal, input::-ms-clear { display: none; }
 

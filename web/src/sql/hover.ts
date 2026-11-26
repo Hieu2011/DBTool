@@ -6,7 +6,7 @@
  * Reads names from the text with the same rules as the completion's regex fallback: no parser involved.
  */
 import type * as Monaco from 'monaco-editor';
-import type { DbObjectInfo, RoutineInfo, SchemaMetadata, TableMeta } from '../types';
+import type { DbObjectInfo, ObjectDetail, RoutineInfo, SchemaMetadata, TableMeta } from '../types';
 import { findTable, metadataOf, tablesInQuery, unquote } from './completion';
 import { derivedTables, maskSql } from './derived';
 import { splitStatements } from './statements';
@@ -23,7 +23,72 @@ export function routinesFor(objModel: Monaco.editor.ITextModel, fnLoad: RoutineL
   return () => dicLoaders.delete(objModel.uri.toString());
 }
 
-const MAX_HOVER_COLUMNS = 40;
+type ColumnLoader = (objTable: DbObjectInfo) => Promise<ObjectDetail>;
+interface ColumnDetail { type: string; notNull: boolean; comment: string; primary: boolean }
+const escapeMarkdown = (strText: string) => strText.replace(/([\\`*_{}[\]<>#|])/g, '\\$1');
+
+/** Monaco model uri -> how to fetch a table's Columns grid (full type, nullable, comment) on that editor's connection. */
+const dicColumnLoaders = new Map<string, ColumnLoader>();
+/** Column details already fetched, by loader and table: lower-case column name -> detail. */
+const dicColumnDetails = new WeakMap<ColumnLoader, Map<string, Promise<Map<string, ColumnDetail> | null>>>();
+
+export function columnDetailsFor(objModel: Monaco.editor.ITextModel, fnLoad: ColumnLoader) {
+  dicColumnLoaders.set(objModel.uri.toString(), fnLoad);
+  return () => dicColumnLoaders.delete(objModel.uri.toString());
+}
+
+/** What the metadata does not carry about a column. Fetched once per table; null when unknown or slow (the hover must not hang). */
+async function tableDetails(objModel: Monaco.editor.ITextModel, objTable: TableMeta): Promise<Map<string, ColumnDetail> | null> {
+  const fnLoad = dicColumnLoaders.get(objModel.uri.toString());
+  if (!fnLoad) return null;
+  let dicCache = dicColumnDetails.get(fnLoad);
+  if (!dicCache) dicColumnDetails.set(fnLoad, dicCache = new Map());
+  const strKey = `${objTable.schema}.${objTable.name}`;
+  let objPending = dicCache.get(strKey);
+  if (!objPending) {
+    objPending = fnLoad({ schema: objTable.schema, name: objTable.name, type: objTable.type }).then(objDetail => {
+      // Section and column names of the providers' Columns grid (the ones TableEditor reads too).
+      const objGrid = objDetail.sections.find(objSection => objSection.title === 'Columns')?.result;
+      if (!objGrid) return null;
+      const indexOf = (strName: string) => objGrid.columns.findIndex(objItem => objItem.name === strName);
+      const [intName, intType, intNullable, intComment] = [indexOf('column'), indexOf('type'), indexOf('nullable'), indexOf('comment')];
+      // Primary key columns, from the Constraints grid: Oracle lists them, PostgreSQL gives "PRIMARY KEY (a, b)".
+      const objKeys = objDetail.sections.find(objSection => objSection.title === 'Constraints')?.result;
+      const keyIndex = (strName: string) => objKeys?.columns.findIndex(objItem => objItem.name === strName) ?? -1;
+      const hsPrimary = new Set<string>();
+      for (const arrRow of objKeys?.rows ?? []) {
+        if (arrRow[keyIndex('type')] !== 'PRIMARY KEY') continue;
+        const strColumns = arrRow[keyIndex('columns')] ?? /\(([^)]*)\)/.exec(String(arrRow[keyIndex('definition')] ?? ''))?.[1] ?? '';
+        for (const strColumn of String(strColumns).split(',')) hsPrimary.add(strColumn.trim().replace(/^"|"$/g, '').toLowerCase());
+      }
+      const dicResult = new Map<string, ColumnDetail>();
+      for (const arrRow of objGrid.rows) {
+        dicResult.set(String(arrRow[intName] ?? '').toLowerCase(), {
+          type: String(arrRow[intType] ?? ''),
+          notNull: arrRow[intNullable] === false || arrRow[intNullable] === 'N',
+          comment: arrRow[intComment] == null ? '' : String(arrRow[intComment]),
+          primary: hsPrimary.has(String(arrRow[intName] ?? '').toLowerCase()),
+        });
+      }
+      return dicResult;
+    }, () => null);
+    dicCache.set(strKey, objPending);
+  }
+  return Promise.race([objPending, new Promise<null>(fnResolve => setTimeout(() => fnResolve(null), 2500))]);
+}
+
+/** TABLE.COLUMN (Column) / type, NOT NULL / comment. */
+async function columnMarkdown(objModel: Monaco.editor.ITextModel, objTable: TableMeta, objColumn: { name: string; dataType: string }) {
+  const objDetail = (await tableDetails(objModel, objTable))?.get(objColumn.name.toLowerCase());
+  const arrLines = [
+    `${objTable.name}.**${objColumn.name}** (Column)`,
+    `${objColumn.name}  \`${objDetail?.type || objColumn.dataType}\`${objDetail ? (objDetail.notNull ? '  *NOT NULL*' : '  *NULL*') : ''}${objDetail?.primary ? '  *PRIMARY KEY*' : ''}`,
+  ];
+  if (objDetail?.comment) arrLines.push(escapeMarkdown(objDetail.comment));
+  return arrLines;
+}
+
+const MAX_HOVER_COLUMNS = 20;
 const ROUTINE_TYPES = ['FUNCTION', 'PROCEDURE'];
 
 // name(parameters) | what it returns. Shared by both dialects unless listed in ORACLE_ONLY / PG_ONLY.
@@ -180,11 +245,27 @@ async function routineSignature(objModel: Monaco.editor.ITextModel, objRoutine: 
     : { label: `${strTitle}(…)`, parameters: [], doc: strDoc };
 }
 
-function tableMarkdown(objTable: TableMeta) {
-  const arrLines = objTable.columns.slice(0, MAX_HOVER_COLUMNS).map(objColumn => `${objColumn.name}  ${objColumn.dataType}`);
-  if (objTable.columns.length > MAX_HOVER_COLUMNS) arrLines.push(`… ${objTable.columns.length - MAX_HOVER_COLUMNS} more`);
-  return [`**${objTable.schema}.${objTable.name}** — ${objTable.type.toLowerCase()}, ${objTable.columns.length} columns`,
-    '```text\n' + arrLines.join('\n') + '\n```'];
+/** Title + one row per column: name, full type, NOT NULL, key, comment (the last three once the Columns grid answered). */
+async function tableMarkdown(objModel: Monaco.editor.ITextModel, objTable: TableMeta) {
+  const strTitle = `**${objTable.schema}.${objTable.name}** — ${objTable.type.toLowerCase()}, ${objTable.columns.length} columns`;
+  const dicDetails = await tableDetails(objModel, objTable);
+  const arrShown = objTable.columns.slice(0, MAX_HOVER_COLUMNS);
+  const strMore = objTable.columns.length > MAX_HOVER_COLUMNS ? `*… ${objTable.columns.length - MAX_HOVER_COLUMNS} more*` : '';
+  // A markdown table: index.css gives the hover its look (.monaco-hover).
+  if (!dicDetails) {
+    const arrRows = arrShown.map(objColumn => `| ${objColumn.name} | \`${objColumn.dataType || '?'}\` |`);
+    if (strMore) arrRows.push(`| ${strMore} | |`);
+    return [strTitle, ['| Column | Type |', '|---|---|', ...arrRows].join('\n')];
+  }
+  const arrRows = arrShown.map(objColumn => {
+    const objDetail = dicDetails.get(objColumn.name.toLowerCase());
+    const strComment = objDetail?.comment.replace(/\s+/g, ' ').trim() ?? '';
+    return `| ${objDetail?.primary ? '**' + objColumn.name + '**' : objColumn.name} | \`${objDetail?.type || objColumn.dataType || '?'}\` `
+      + `| ${objDetail?.primary ? 'PK' : objDetail?.notNull ? 'NOT NULL' : ''} `
+      + `| ${escapeMarkdown(strComment.length > 70 ? strComment.slice(0, 69) + '…' : strComment)} |`;
+  });
+  if (strMore) arrRows.push(`| ${strMore} | | | |`);
+  return [strTitle, ['| Column | Type | Null | Comment |', '|---|---|---|---|', ...arrRows].join('\n')];
 }
 
 /** The call the cursor is inside: its name (lower case, maybe schema-qualified) and the argument index. */
@@ -234,7 +315,12 @@ export function objectAt(objModel: Monaco.editor.ITextModel, objPosition: Monaco
     return objPlain ? asInfo(objPlain) : named(strOwner) ?? null;
   }
   const objTable = dicTables.get(strWord) ?? findTable(objMeta, strWord);
-  return objTable ? asInfo(objTable) : named(strWord) ?? null;
+  if (objTable) return asInfo(objTable);
+  const objNamed = named(strWord);
+  if (objNamed) return objNamed;
+  // A bare column: the table of this statement that has it.
+  const objOwner = [...new Set(dicTables.values())].find(objItem => objItem.columns.some(objColumn => objColumn.name.toLowerCase() === strWord));
+  return objOwner ? asInfo(objOwner) : null;
 }
 
 let boolRegistered = false;
@@ -265,12 +351,12 @@ export function registerSqlHover(objMonaco: typeof Monaco) {
         // alias.column / table.column
         const objOwner = dicTables.get(strOwner) ?? findTable(objMeta, strOwner);
         const objColumn = objOwner && columnOf(objOwner);
-        if (objOwner && objColumn) return answer([`**${objColumn.name}**  \`${objColumn.dataType}\``, `column of ${objOwner.schema}.${objOwner.name}`]);
+        if (objOwner && objColumn) return answer(await columnMarkdown(objModel, objOwner, objColumn));
         const objDerived = arrDerived.find(objItem => unquote(objItem.name) === strOwner);
         if (objDerived?.columns.some(strColumn => unquote(strColumn) === strWord)) return answer([`**${objWord.word}**`, `column of subquery ${objDerived.name}`]);
         // schema.table / schema.routine
         const objTable = findTable(objMeta, `${strOwner}.${strWord}`);
-        if (objTable) return answer(tableMarkdown(objTable));
+        if (objTable) return answer(await tableMarkdown(objModel, objTable));
         const arrRoutines = routinesNamed(objMeta, strWord, strOwner);
         if (arrRoutines.length > 0) {
           const arrSignatures = await Promise.all(arrRoutines.slice(0, 5).map(objRoutine => routineSignature(objModel, objRoutine)));
@@ -282,13 +368,15 @@ export function registerSqlHover(objMonaco: typeof Monaco) {
       if (objMeta && !boolCall) {
         // An alias written in this statement (the table's own name is handled just below).
         const objAliased = dicTables.get(strWord);
-        if (objAliased && objAliased.name.toLowerCase() !== strWord) return answer([`alias of **${objAliased.schema}.${objAliased.name}**`, ...tableMarkdown(objAliased).slice(1)]);
+        if (objAliased && objAliased.name.toLowerCase() !== strWord) return answer([`alias of **${objAliased.schema}.${objAliased.name}**`, ...(await tableMarkdown(objModel, objAliased)).slice(1)]);
         const objDerived = arrDerived.find(objItem => unquote(objItem.name) === strWord);
         if (objDerived) return answer([`**${objDerived.name}** — subquery`, '```text\n' + (objDerived.columns.join('\n') || '(columns unknown)') + '\n```']);
         const objTable = dicTables.get(strWord) ?? findTable(objMeta, strWord);
-        if (objTable) return answer(tableMarkdown(objTable));
+        if (objTable) return answer(await tableMarkdown(objModel, objTable));
         // A column of the tables this statement uses.
         const arrOwners = [...new Set(dicTables.values())].filter(columnOf);
+        // One table has it: the full card. Several: one line each.
+        if (arrOwners.length === 1) return answer(await columnMarkdown(objModel, arrOwners[0], columnOf(arrOwners[0])!));
         if (arrOwners.length > 0) {
           return answer(arrOwners.slice(0, 6).map(objOwner => `**${columnOf(objOwner)!.name}**  \`${columnOf(objOwner)!.dataType}\` — ${objOwner.schema}.${objOwner.name}`));
         }

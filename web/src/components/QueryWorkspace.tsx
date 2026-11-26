@@ -8,7 +8,8 @@ import { dialectOf, editorLanguage, hasTransactions, isSqlKind } from '../sql/di
 import { registerRedisCompletion } from '../sql/redisCompletion';
 import { foldByStatement, registerSqlFolding } from '../sql/folding';
 import { registerMongoCompletion } from '../sql/mongoCompletion';
-import { objectAt, registerSqlHover, routinesFor } from '../sql/hover';
+import { columnDetailsFor, registerSqlHover, routinesFor } from '../sql/hover';
+import { attachAltClickCursor, attachObjectLinks } from '../sql/objectLinks';
 import { formatSql, isUnfilteredWrite } from '../sql/format';
 import { splitStatements, statementAt } from '../sql/statements';
 import type { Connection, DbObjectInfo, QueryError, QueryResult, SchemaMetadata } from '../types';
@@ -37,6 +38,8 @@ interface Props {
   boolActive: boolean;
   objMetadata: SchemaMetadata | undefined;
   loadMetadata: (strId: string, boolRefresh?: boolean, strSchema?: string) => Promise<SchemaMetadata>;
+  /** A script generated from the result grid opens in a new tab of this connection. */
+  onOpenSql?: (strSql: string) => void;
   /** F12 on a table / routine name: opens its object tab. */
   onOpenObject?: (objObject: DbObjectInfo) => void;
   /** Lets the app warn before closing a tab that has uncommitted work. */
@@ -55,6 +58,8 @@ interface Props {
   onToggleWordWrap: () => void;
   /** Raised by the app when the connection is disconnected: this tab closes its session. */
   intDisconnect: number;
+  /** Raised when the connection proved reachable elsewhere (sidebar tree): a failed session connects again. */
+  intReconnect: number;
   /** The Disconnect button: the app asks about open transactions, then disconnects every tab of the connection. */
   onDisconnect: (strConnectionId: string) => void;
   /** This tab's session changed state; null when the tab goes away. */
@@ -104,8 +109,21 @@ const runLabel = ({ result: objResult, error: objError }: StatementRun) => {
   return objResult.recordsAffected >= 0 ? `${objResult.recordsAffected.toLocaleString()} affected` : 'Done';
 };
 
+/** What a result tab is about: the statement's verb and its main table ("SELECT cm_voucher"), else its first words. */
+function runTitle(strSql: string) {
+  // comments and strings out of the way, one line
+  const strFlat = strSql.replace(/--.*$/gm, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/'(?:[^']|'')*'/g, "''").replace(/\s+/g, ' ').trim();
+  const strVerb = /^[A-Za-z]+/.exec(strFlat)?.[0].toUpperCase() ?? '';
+  const arrTable = /^(?:insert\s+into|update|merge\s+into|delete\s+from|truncate\s+table|(?:create|alter|drop)\s+(?:or\s+replace\s+)?\w+)\s+((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strFlat)
+    ?? /\bfrom\s+((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strFlat);
+  // schema.table -> table
+  const strTable = arrTable?.[1].split('.').pop()?.replace(/"/g, '');
+  const strTitle = strTable ? `${strVerb} ${strTable}` : strFlat.slice(0, 28);
+  return strTitle.length > 34 ? `${strTitle.slice(0, 33)}…` : strTitle;
+}
+
 export function QueryWorkspace({
-  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, boolWordWrap, onToggleWordWrap, intDisconnect, onDisconnect, onSessionState, onOpenObject,
+  strTabId, objConnection, arrConnections, onChangeConnection, boolActive, objMetadata, loadMetadata, onTransactionChange, onHandle, onContentChange, strInitialSql, boolAutoRun, boolLazyConnect, boolWordWrap, onToggleWordWrap, intDisconnect, intReconnect, onDisconnect, onSessionState, onOpenObject, onOpenSql,
 }: Props) {
   const refOnSessionState = useRef(onSessionState);
   refOnSessionState.current = onSessionState;
@@ -182,6 +200,13 @@ export function QueryWorkspace({
     setBoolTxOpen(false);
   }, [intDisconnect, strSessionId]);
 
+  const refReconnect = useRef(intReconnect);
+  useEffect(() => {
+    if (intReconnect === refReconnect.current) return;
+    refReconnect.current = intReconnect;
+    if (strSession === 'failed') connect();
+  });
+
   // The sidebar shows one state per connection, made of its tabs' sessions: tell the app every change, and the end.
   useEffect(() => {
     refOnSessionState.current(strTabId, objConnection.id, strSession);
@@ -229,30 +254,8 @@ export function QueryWorkspace({
       wordWrap: boolWordWrap ? 'on' : 'off',
       wrappingIndent: 'same',
     });
-    // Alt + click adds a cursor where it lands (Alt + drag stays the column block). Monaco moves the only cursor there
-    // on the press, so the cursors are remembered just before it (capture phase) and put back on the release.
-    let objAltPress: { x: number; y: number; selections: Monaco.Selection[] } | null = null;
-    const onAltPress = (objEvent: PointerEvent) => {
-      objAltPress = objEvent.altKey && !objEvent.ctrlKey && !objEvent.shiftKey && !objEvent.metaKey && objEvent.button === 0
-        ? { x: objEvent.pageX, y: objEvent.pageY, selections: objEditor.getSelections() ?? [] }
-        : null;
-    };
-    const elHost = refHost.current!;
-    elHost.addEventListener('pointerdown', onAltPress, true);
-    objEditor.onMouseUp(objEvent => {
-      const objPress = objAltPress;
-      objAltPress = null;
-      const objAt = objEvent.target.position;
-      if (!objPress || !objAt || objEvent.target.type !== monaco.editor.MouseTargetType.CONTENT_TEXT &&
-        objEvent.target.type !== monaco.editor.MouseTargetType.CONTENT_EMPTY) return;
-      // Moved while pressed: that was a column block, leave it alone.
-      if (Math.abs(objEvent.event.posx - objPress.x) > 3 || Math.abs(objEvent.event.posy - objPress.y) > 3) return;
-      // A second Alt + click on a cursor takes it away again (never the last one).
-      const arrKept = objPress.selections.filter(objItem => !(objItem.isEmpty() && objItem.getPosition().equals(objAt)));
-      if (arrKept.length === 0) return;
-      const boolRemove = arrKept.length < objPress.selections.length;
-      objEditor.setSelections(boolRemove ? arrKept : [...arrKept, new monaco.Selection(objAt.lineNumber, objAt.column, objAt.lineNumber, objAt.column)]);
-    });
+    // Alt + click adds a cursor where it lands (Alt + drag stays the column block).
+    const fnForgetAltClick = attachAltClickCursor(objEditor, refHost.current!);
     // Alt+Z is Monaco's own toggle, but for one editor only: here it switches every tab and is remembered.
     objEditor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => refOnToggleWordWrap.current());
     objEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => refRun.current(false));
@@ -275,54 +278,8 @@ export function QueryWorkspace({
         objEditor.pushUndoStop();
       },
     });
-    const goToObject = async (objPosition: monaco.Position | null) => {
-      if (!objPosition) return;
-      let objFound = objectAt(objModel, objPosition);
-      if (objFound && 'loadSchema' in objFound) {
-        await refLoadMetadata.current(objConnection.id, false, objFound.loadSchema).catch(() => {});
-        objFound = objectAt(objModel, objPosition);
-      }
-      if (objFound && !('loadSchema' in objFound)) {
-        objEditor.setPosition(objPosition); // drops the cursor Ctrl + click just added
-        refOnOpenObject.current?.(objFound);
-      }
-    };
-    // F12 (and the right-click menu): the table, view or routine under the cursor opens in its own tab.
-    objEditor.addAction({
-      id: 'dbstudio.goToObject',
-      label: 'Go to object',
-      keybindings: [monaco.KeyCode.F12],
-      contextMenuGroupId: 'navigation',
-      contextMenuOrder: 1,
-      run: () => { void goToObject(objEditor.getPosition()); },
-    });
-    // With Ctrl held, a name that can be opened is underlined and takes the hand cursor, like a link.
-    const objLink = objEditor.createDecorationsCollection();
-    let strLinkAt = '';
-    const clearLink = () => { if (strLinkAt) { strLinkAt = ''; objLink.clear(); } };
-    objEditor.onMouseMove(objEvent => {
-      const objPosition = objEvent.target.position;
-      const objWord = objPosition && objEvent.event.ctrlKey && objEvent.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT
-        ? objModel.getWordAtPosition(objPosition) : null;
-      if (!objPosition || !objWord) return clearLink();
-      const strAt = `${objPosition.lineNumber}:${objWord.startColumn}:${objWord.word}`;
-      if (strAt === strLinkAt) return;
-      clearLink();
-      if (!objectAt(objModel, objPosition)) return;
-      strLinkAt = strAt;
-      objLink.set([{
-        range: new monaco.Range(objPosition.lineNumber, objWord.startColumn, objPosition.lineNumber, objWord.endColumn),
-        options: { inlineClassName: 'dbstudio-link' },
-      }]);
-    });
-    objEditor.onMouseLeave(clearLink);
-    objEditor.onKeyUp(objEvent => { if (objEvent.keyCode === monaco.KeyCode.Ctrl) clearLink(); });
-    objModel.onDidChangeContent(clearLink);
-    // Ctrl + click on a name does the same.
-    objEditor.onMouseDown(objEvent => {
-      if (objEvent.event.ctrlKey && objEvent.event.leftButton && objEvent.target.type === monaco.editor.MouseTargetType.CONTENT_TEXT)
-        void goToObject(objEvent.target.position);
-    });
+    // F12, the right-click menu, Ctrl + click: the table, view or routine under the cursor opens in its own tab.
+    attachObjectLinks(objEditor, strSchema => refLoadMetadata.current(objConnection.id, false, strSchema), objObject => refOnOpenObject.current?.(objObject));
     // Written straight to the DOM: a cursor move must not re-render the result grid.
     const showCursor = () => {
       const objPosition = objEditor.getPosition();
@@ -364,11 +321,14 @@ export function QueryWorkspace({
     const fnUnregister = metadataFor(objModel, () => refMetadata.current);
     const fnForgetLoader = schemaLoaderFor(objModel, strSchema => refLoadMetadata.current(objConnection.id, false, strSchema));
     const fnForgetRoutines = routinesFor(objModel, objRoutine => api.routineInfo(objConnection.id, objRoutine));
+    // Hover on a column: full type, NOT NULL and comment come from the table's quick Columns grid.
+    const fnForgetColumns = columnDetailsFor(objModel, objTable => api.objectDetail(objConnection.id, objTable, false));
     return () => {
       fnUnregister();
       fnForgetRoutines();
+      fnForgetColumns();
       fnForgetLoader();
-      elHost.removeEventListener('pointerdown', onAltPress, true);
+      fnForgetAltClick();
       objEditor.dispose();
       objModel.dispose();
     };
@@ -754,14 +714,17 @@ export function QueryWorkspace({
         )}
         {/* one tab per statement of the last run */}
         {objRun.status === 'done' && arrRuns.length > 1 && (
-          <div className="flex h-7 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-2" role="tablist">
+          <div className="flex h-8 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-2" role="tablist">
             {arrRuns.map((objItem, intIndex) => (
               <button key={intIndex} role="tab" aria-selected={intIndex === intActiveRun}
                 title={objItem.sql.slice(0, 300)} onClick={() => setIntActiveRun(intIndex)}
-                className={`h-6 whitespace-nowrap rounded-t border border-b-0 px-2 text-xs ${
+                className={`flex h-7 items-center gap-1.5 whitespace-nowrap rounded-t border border-b-0 px-2 text-xs ${
                   intIndex === intActiveRun ? 'border-line bg-panel' : 'border-transparent hover:bg-hover'
                 } ${objItem.error ? 'text-danger' : intIndex === intActiveRun ? '' : 'text-muted'}`}>
-                {intIndex + 1}. {runLabel(objItem)}
+                {/* which statement, what it is, then how much came back: the count must not read as the tab's name */}
+                <span className={`rounded px-1 text-[10px] font-semibold tabular-nums ${intIndex === intActiveRun ? 'bg-accent text-bg' : 'bg-hover'}`}>{intIndex + 1}</span>
+                <span className="font-semibold">{runTitle(objItem.sql)}</span>
+                <span className={`rounded-full border px-1.5 text-[10px] tabular-nums ${objItem.error ? 'border-danger' : 'border-line text-muted'}`}>{runLabel(objItem)}</span>
               </button>
             ))}
           </div>
@@ -785,7 +748,7 @@ export function QueryWorkspace({
                     // The updates run in the tab's own session, so its transaction mode applies to them.
                     ? (
                       <EditableResult key={intActiveRun} objConnection={objConnection} strSql={objActiveRun.sql} objResult={objActiveResult}
-                        strSessionId={strSessionId} boolAutoCommit={boolAutoCommit} intMaxRows={intMaxRows} onRan={() => { if (!boolAutoCommit) setBoolTxOpen(true); }} />
+                        strSessionId={strSessionId} boolAutoCommit={boolAutoCommit} intMaxRows={intMaxRows} onOpenSql={onOpenSql} onRan={() => { if (!boolAutoCommit) setBoolTxOpen(true); }} />
                     )
                     : <ResultGrid key={intActiveRun} objResult={objActiveResult} />}
               </div>

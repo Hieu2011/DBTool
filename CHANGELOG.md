@@ -3,6 +3,16 @@
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
 
+## 1.1.8 — 2026-11-26
+
+- Lưới kết quả: chuột phải → Generate script as → INSERT / WHERE IN () / WHERE AND OR / UPDATE, ra tab SQL, file hoặc clipboard (UPDATE tìm theo khoá chính)
+- Lưới kết quả: chọn vùng ô bằng kéo chuột, Shift + click hoặc Shift + mũi tên; Ctrl+C chép đúng vùng đó
+- Rê chuột lên cột hiện kiểu đầy đủ, NOT NULL, khoá chính và comment; thẻ của bảng liệt kê cột kèm kiểu và comment
+- Ctrl + click (hoặc F12) vào tên cột mở bảng chứa cột đó
+- Tab Source của store có gợi ý, hover, Ctrl + click và Alt + click như tab SQL
+- Tab kết quả hiện tên câu query in đậm tách khỏi số dòng (vd SELECT cm_voucher · 11 rows)
+- Chấm trạng thái của connection hết đỏ sau khi Retry thành công
+
 ## 1.1.7 — 2026-11-26
 
 - Store (procedure / function / package): sửa code ngay ở tab Source rồi Save (Ctrl+S), có Undo / Redo / Comment; Oracle compile lỗi thì báo và mở tab Errors

@@ -9,6 +9,9 @@ import type { Connection, DbObjectInfo, ObjectDetail, QueryResult, SchemaMetadat
 import { envVar } from '../envColor';
 import { IconClose, IconComment, IconRedo, IconSave, IconUndo } from './icons';
 import { debugScript } from '../sql/routineSource';
+import { metadataFor, schemaLoaderFor } from '../sql/completion';
+import { columnDetailsFor, routinesFor } from '../sql/hover';
+import { attachAltClickCursor, attachObjectLinks } from '../sql/objectLinks';
 import { ResultGrid } from './ResultGrid';
 import { EditableResult } from './EditableResult';
 import { TABLE_LIKE } from './ObjectTree';
@@ -36,6 +39,8 @@ interface Props {
   onRenamed: (strNewName: string) => void;
   /** The Source was edited / saved / reverted: the tab shows a mark. */
   onDirtyChange?: (boolDirty: boolean) => void;
+  /** Loads the connection's metadata (or one more Oracle schema): autocomplete of the Source editor. */
+  loadMetadata?: (strId: string, boolRefresh?: boolean, strSchema?: string) => Promise<SchemaMetadata>;
 }
 
 type LoadState =
@@ -94,8 +99,15 @@ const unixEol = (strText: string) => strText.replace(/\r\n?/g, '\n');
 
 /** A routine's code, editable: Ctrl+S compiles it. */
 type SourceHandle = { trigger: (strAction: string) => void };
+interface SourceAssist {
+  connectionId: string;
+  metadata: SchemaMetadata | undefined;
+  loadSchema: (strSchema: string) => Promise<SchemaMetadata>;
+  openObject: (objObject: DbObjectInfo) => void;
+}
 
-function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, onHistory, refHandle }: {
+function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, onHistory, refHandle, refAssist }: {
+  refAssist: React.MutableRefObject<SourceAssist>;
   strText: string; strLanguage: string; boolReadOnly: boolean; onChange: (strValue: string) => void; onSave: () => void;
   /** Whether there is something to undo / redo, after every change. */
   onHistory: (boolCanUndo: boolean, boolCanRedo: boolean) => void;
@@ -126,7 +138,21 @@ function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, on
       lineHeight: 20,
       scrollBeyondLastLine: false,
       padding: { top: 8 },
+      tabSize: 2,
+      // same suggestions as the query editor: names from the database, not words of the text
+      wordBasedSuggestions: 'off',
+      suggest: { showWords: false },
+      quickSuggestions: { other: true, comments: false, strings: false },
+      fixedOverflowWidgets: true,
     });
+    const arrForget = [
+      metadataFor(objModel, () => refAssist.current.metadata),
+      schemaLoaderFor(objModel, strSchema => refAssist.current.loadSchema(strSchema)),
+      routinesFor(objModel, objRoutine => api.routineInfo(refAssist.current.connectionId, objRoutine)),
+      columnDetailsFor(objModel, objTable => api.objectDetail(refAssist.current.connectionId, objTable, false)),
+      attachAltClickCursor(objEditor, refHost.current!),
+    ];
+    attachObjectLinks(objEditor, strSchema => refAssist.current.loadSchema(strSchema), objObject => refAssist.current.openObject(objObject));
     objEditor.onDidChangeModelContent(() => {
       if (!refSetting.current) refOnChange.current(objModel.getValue());
       refOnHistory.current(objModel.canUndo(), objModel.canRedo());
@@ -137,11 +163,12 @@ function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, on
     return () => {
       refEditor.current = null;
       refHandle.current = null;
+      for (const fnForget of arrForget) fnForget();
       refOnHistory.current(false, false);
       objEditor.dispose();
       objModel.dispose();
     };
-  }, [strLanguage, refHandle]);
+  }, [strLanguage, refHandle, refAssist]);
 
   // Reverted or reloaded: the editor follows, the cursor stays where it was.
   useEffect(() => {
@@ -235,7 +262,20 @@ function ColumnProperties({ objColumns, arrRow, objConstraints }: { objColumns: 
   );
 }
 
-export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata, onOpenSql, onExecute, onOpenObject, onRenamed, onDirtyChange }: Props) {
+export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata, onOpenSql, onExecute, onOpenObject, onRenamed, onDirtyChange, loadMetadata }: Props) {
+  // What the Source editor needs for autocomplete, hover and go-to-object; read through a ref so it stays current.
+  const refAssist = useRef<SourceAssist>(null!);
+  refAssist.current = {
+    connectionId: objConnection.id,
+    metadata: objMetadata,
+    loadSchema: strSchemaName => loadMetadata?.(objConnection.id, false, strSchemaName) ?? Promise.reject(new Error("metadata is not available")),
+    openObject: onOpenObject,
+  };
+  // A routine opened before the connection's metadata was loaded: load it, the editor suggests nothing without it.
+  const boolNeedsMetadata = ROUTINE_TYPES.includes(objObject.type) && !objMetadata;
+  useEffect(() => {
+    if (boolNeedsMetadata) loadMetadata?.(objConnection.id).catch(() => {});
+  }, [boolNeedsMetadata, objConnection.id, loadMetadata]);
   const [objState, setObjState] = useState<LoadState>({ status: 'loading' });
   const [strActive, setStrActive] = useState<string | null>(null);
   const [strCount, setStrCount] = useState<string | null>(null);
@@ -602,7 +642,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                 {strShown === SOURCE_TAB && (objDetail.ddl
                   ? (
                     <SourceEditor strText={strSource} strLanguage={editorLanguage(objConnection.kind)} boolReadOnly={boolSaving}
-                      refHandle={refSource} onHistory={(boolUndo, boolRedo) => setObjHistory(objPrev => (objPrev.undo === boolUndo && objPrev.redo === boolRedo ? objPrev : { undo: boolUndo, redo: boolRedo }))}
+                      refHandle={refSource} refAssist={refAssist} onHistory={(boolUndo, boolRedo) => setObjHistory(objPrev => (objPrev.undo === boolUndo && objPrev.redo === boolRedo ? objPrev : { undo: boolUndo, redo: boolRedo }))}
                       onChange={strValue => setStrDraft(unixEol(strValue) === unixEol(objDetail.ddl ?? '') ? null : strValue)} onSave={saveSource} />
                   )
                   : (
@@ -669,7 +709,7 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                       <div className="flex h-full flex-col">
                         <div className="min-h-0 flex-1">
                           {TABLE_LIKE.has(strType)
-                            ? <EditableResult objConnection={objConnection} strSql={strSelectAll} objResult={objData.result} intMaxRows={DATA_ROWS} strExportName={`${strSchema}.${strName}`} />
+                            ? <EditableResult objConnection={objConnection} strSql={strSelectAll} objResult={objData.result} intMaxRows={DATA_ROWS} strExportName={`${strSchema}.${strName}`} onOpenSql={strScript => onOpenSql(strScript, false)} />
                             : <ResultGrid objResult={objData.result} strExportName={`${strSchema}.${strName}`} />}
                         </div>
                         <div className="shrink-0 border-t border-line bg-bg px-3 py-0.5 text-xs text-muted">
