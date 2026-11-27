@@ -3,6 +3,12 @@
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
 
+## 1.1.11 — 2026-11-27
+
+- Chạy nhiều câu lệnh: câu không trả dòng (CREATE, INSERT, UPDATE…) gộp vào một khung Messages thay vì mỗi câu một tab; mỗi dòng có dấu thành công / lỗi, số dòng ảnh hưởng, thời gian, thông báo lỗi
+- Thanh trạng thái tách thời gian query: execute (DB chạy), fetch (đọc dòng), app, render (vẽ lưới); rê chuột để xem chú thích (PostgreSQL, Oracle)
+- Lịch chọn ngày: bấm Today ghi luôn ngày hôm nay vào ô
+
 ## 1.1.10 — 2026-11-27
 
 - Cuộn tới cuối lưới là tải tiếp các dòng kế, không chạy lại câu lệnh và không còn giới hạn 100.000 dòng (PostgreSQL, Oracle); nút More rows đọc tiếp 10.000 dòng

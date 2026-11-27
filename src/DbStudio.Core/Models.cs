@@ -66,6 +66,10 @@ public sealed class QueryResult
     /// <summary>True when the query had more rows than MaxRows.</summary>
     public bool Truncated { get; set; }
     public long ElapsedMs { get; set; }
+    /// <summary>Until the server answered the statement (first row ready). Null when not measured.</summary>
+    public long? ExecuteMs { get; set; }
+    /// <summary>Reading the returned rows from the server.</summary>
+    public long? FetchMs { get; set; }
     /// <summary>Further result sets of the same statement (it returned several cursors).</summary>
     public List<QueryResult>? More { get; set; }
     /// <summary>Document databases: row i as formatted JSON, for the JSON view. Null for SQL results.</summary>

@@ -75,10 +75,9 @@ export function DatePickerButton({ strValue, boolDateOnly, boolSmall, onPick, on
     return intAt === intPart ? pad((((Number(strOld) || 0) + intStep) % intSize + intSize) % intSize) : strOld;
   }));
   const now = () => {
+    // Same as a click on a day: the text is written at once.
     const objNow = new Date();
-    setObjDay(objNow);
-    setObjMonth(objNow);
-    setArrTime([pad(objNow.getHours()), pad(objNow.getMinutes()), pad(objNow.getSeconds())]);
+    apply(objNow, [pad(objNow.getHours()), pad(objNow.getMinutes()), pad(objNow.getSeconds())]);
   };
 
   return (
@@ -91,11 +90,12 @@ export function DatePickerButton({ strValue, boolDateOnly, boolSmall, onPick, on
       <Popover.Portal>
         <Popover.Content align="end" sideOffset={6} collisionPadding={8} data-cell-popover onOpenAutoFocus={objEvent => objEvent.preventDefault()}
           className="z-50 rounded-lg border border-line bg-panel p-2.5 font-sans text-fg shadow-2xl outline-none">
-          <button type="button" onClick={now} title="Go to today, now"
+          <button type="button" onClick={now} title={boolDateOnly ? 'Set today' : 'Set today, at the current time'}
             className="mb-1 block w-full rounded px-2 py-1 text-center text-[11px] text-muted hover:bg-hover hover:text-fg">
             Today · {objToday.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
           </button>
-          <DayPicker mode="single" required selected={objDay} month={objMonth} onMonthChange={setObjMonth}
+          {/* onSelect is what makes `selected` controlled: without it the library keeps its first value. */}
+          <DayPicker mode="single" required selected={objDay} onSelect={setObjDay} month={objMonth} onMonthChange={setObjMonth}
             onDayClick={objDate => apply(objDate)}
             captionLayout="dropdown" startMonth={new Date(1990, 0)} endMonth={new Date(objToday.getFullYear() + 10, 11)}
             showOutsideDays fixedWeeks weekStartsOn={1}

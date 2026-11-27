@@ -27,6 +27,9 @@ export interface QueryResult {
   recordsAffected: number;
   truncated: boolean;
   elapsedMs: number;
+  /** Until the server answered (first row ready) / reading the rows. Only SQL statements measure them. */
+  executeMs?: number | null;
+  fetchMs?: number | null;
   /** A cut result the tab's session kept open: api.fetchMore reads its next rows. */
   cursor?: string | null;
   /** Further result sets of the same statement (it returned several cursors). */

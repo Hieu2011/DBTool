@@ -84,7 +84,8 @@ export interface EditorHandle {
 }
 
 /** Outcome of one statement: a result or an error. */
-interface StatementRun { sql: string; result?: QueryResult; error?: QueryError }
+// clientMs: the whole request as the UI saw it (server time + transfer + parsing).
+interface StatementRun { sql: string; result?: QueryResult; error?: QueryError; clientMs?: number }
 
 type RunState =
   | { status: 'idle' }
@@ -116,7 +117,7 @@ function runTitle(strSql: string) {
   // comments and strings out of the way, one line
   const strFlat = strSql.replace(/--.*$/gm, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/'(?:[^']|'')*'/g, "''").replace(/\s+/g, ' ').trim();
   const strVerb = /^[A-Za-z]+/.exec(strFlat)?.[0].toUpperCase() ?? '';
-  const arrTable = /^(?:insert\s+into|update|merge\s+into|delete\s+from|truncate\s+table|(?:create|alter|drop)\s+(?:or\s+replace\s+)?\w+)\s+((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strFlat)
+  const arrTable = /^(?:insert\s+into|update|merge\s+into|delete\s+from|truncate\s+table|(?:create|alter|drop)\s+(?:or\s+replace\s+)?\w+)\s+(?:if\s+(?:not\s+)?exists\s+)?((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strFlat)
     ?? /\bfrom\s+((?:"[^"]+"|[\w$#]+)(?:\.(?:"[^"]+"|[\w$#]+))*)/i.exec(strFlat);
   // schema.table -> table
   const strTable = arrTable?.[1].split('.').pop()?.replace(/"/g, '');
@@ -155,6 +156,7 @@ export function QueryWorkspace({
   // Rows of the running statement, shown while more are still being read.
   const [objLive, setObjLive] = useState<QueryResult | null>(null);
   const [intMaxRows, setIntMaxRows] = useState(1000);
+  const [objPaint, setObjPaint] = useState<{ run: StatementRun; ms: number } | null>(null);
   const [intEditorHeight, setIntEditorHeight] = useState(280);
   // Which of the two panes are shown: the arrows on the splitter give one of them the whole tab.
   const [strPane, setStrPane] = useState<'both' | 'editor' | 'results'>('both');
@@ -492,6 +494,7 @@ export function QueryWorkspace({
       setObjRun({ status: 'running', queryId: strQueryId, startedAt: lngStartedAt, index: intIndex, total: arrStatements.length });
       await refOpening.current; // a session connects one call at a time
       const lngStatementAt = Date.now();
+      const decSentAt = performance.now();
       let lngShownAt = 0;
       setObjLive(null);
       try {
@@ -507,7 +510,7 @@ export function QueryWorkspace({
         api.addHistory(objConnection.id, objStatement.text, objResult.elapsedMs,
           objResult.columns.length > 0 ? objResult.rows.length : objResult.recordsAffected >= 0 ? objResult.recordsAffected : null,
           null).catch(() => {});
-        arrDone.push({ sql: objStatement.text, result: objResult });
+        arrDone.push({ sql: objStatement.text, result: objResult, clientMs: Math.round(performance.now() - decSentAt) });
         for (const objMore of objResult.more ?? []) arrDone.push({ sql: objStatement.text, result: objMore }); // one tab per cursor
       } catch (objEx) {
         const objError = toQueryError(objEx);
@@ -536,10 +539,15 @@ export function QueryWorkspace({
     // Show the failed statement, else the last one that returned rows.
     const intLast = arrDone.length - 1;
     const intLastGrid = arrDone.map(objItem => (objItem.result?.columns.length ?? 0) > 0).lastIndexOf(true);
+    const intShown = arrDone[intLast].error || intLastGrid < 0 ? intLast : intLastGrid;
     setObjLive(null);
     setArrRuns(arrDone);
-    setIntActiveRun(arrDone[intLast].error || intLastGrid < 0 ? intLast : intLastGrid);
+    setIntActiveRun(intShown);
     setObjRun({ status: 'done', skipped: arrStatements.length - intRan });
+    // Time until the grid is on screen: the timeout after a frame callback runs once that frame is painted.
+    const decSetAt = performance.now();
+    setObjPaint(null);
+    requestAnimationFrame(() => setTimeout(() => setObjPaint({ run: arrDone[intShown], ms: Math.round(performance.now() - decSetAt) })));
   };
   refRun.current = execute;
 
@@ -632,8 +640,14 @@ export function QueryWorkspace({
   };
 
   const boolRunning = objRun.status === 'running';
-  const objActiveRun = objRun.status === 'done' ? arrRuns[intActiveRun] : undefined;
+  // Only statements that returned rows get a tab; everything else (DDL, DML, errors) is one line in Messages.
+  const hasGrid = (objItem: StatementRun | undefined) => (objItem?.result?.columns.length ?? 0) > 0;
+  const boolDone = objRun.status === 'done';
+  const boolMessages = boolDone && !hasGrid(arrRuns[intActiveRun]);
+  const objActiveRun = boolDone && !boolMessages ? arrRuns[intActiveRun] : undefined;
   const objActiveResult = objActiveRun?.result;
+  const intGrids = arrRuns.filter(hasGrid).length;
+  const intFailed = arrRuns.filter(objItem => objItem.error).length;
 
   return (
     <section className={`@container absolute inset-0 flex-col bg-panel ${boolActive ? 'flex' : 'hidden'}`}>
@@ -796,20 +810,28 @@ export function QueryWorkspace({
           </div>
         )}
         {/* one tab per statement of the last run */}
-        {objRun.status === 'done' && arrRuns.length > 1 && (
+        {boolDone && intGrids > 0 && arrRuns.length > 1 && (
           <div className="flex h-8 shrink-0 items-end gap-px overflow-x-auto border-b border-line px-2" role="tablist">
-            {arrRuns.map((objItem, intIndex) => (
+            {arrRuns.map((objItem, intIndex) => hasGrid(objItem) && (
               <button key={intIndex} role="tab" aria-selected={intIndex === intActiveRun}
                 title={objItem.sql.slice(0, 300)} onClick={() => setIntActiveRun(intIndex)}
                 className={`flex h-7 items-center gap-1.5 whitespace-nowrap rounded-t border border-b-0 px-2 text-xs ${
-                  intIndex === intActiveRun ? 'border-line bg-panel' : 'border-transparent hover:bg-hover'
-                } ${objItem.error ? 'text-danger' : intIndex === intActiveRun ? '' : 'text-muted'}`}>
+                  intIndex === intActiveRun ? 'border-line bg-panel' : 'border-transparent text-muted hover:bg-hover'}`}>
                 {/* which statement, what it is, then how much came back: the count must not read as the tab's name */}
                 <span className={`rounded px-1 text-[10px] font-semibold tabular-nums ${intIndex === intActiveRun ? 'bg-accent text-bg' : 'bg-hover'}`}>{intIndex + 1}</span>
                 <span className="font-semibold">{runTitle(objItem.sql)}</span>
-                <span className={`rounded-full border px-1.5 text-[10px] tabular-nums ${objItem.error ? 'border-danger' : 'border-line text-muted'}`}>{runLabel(objItem)}</span>
+                <span className="rounded-full border border-line px-1.5 text-[10px] tabular-nums text-muted">{runLabel(objItem)}</span>
               </button>
             ))}
+            <button role="tab" aria-selected={boolMessages} onClick={() => setIntActiveRun(-1)}
+              title="Every statement of the last run: what it did, how long it took, its error"
+              className={`flex h-7 items-center gap-1.5 whitespace-nowrap rounded-t border border-b-0 px-2 text-xs ${
+                boolMessages ? 'border-line bg-panel' : 'border-transparent hover:bg-hover'} ${intFailed > 0 ? 'text-danger' : boolMessages ? '' : 'text-muted'}`}>
+              <span className="font-semibold">Messages</span>
+              <span className={`rounded-full border px-1.5 text-[10px] tabular-nums ${intFailed > 0 ? 'border-danger' : 'border-line text-muted'}`}>
+                {intFailed > 0 ? `${intFailed} failed` : arrRuns.length}
+              </span>
+            </button>
           </div>
         )}
 
@@ -845,16 +867,41 @@ export function QueryWorkspace({
               </div>
             </div>
           )}
-          {objActiveResult && objActiveResult.columns.length === 0 && (
-            <p className="p-4 text-muted">
-              Statement finished. {objActiveResult.recordsAffected >= 0 && `${objActiveResult.recordsAffected.toLocaleString()} rows affected.`}
-            </p>
-          )}
-          {objActiveRun?.error && (
-            <div className="p-4">
-              <p className="whitespace-pre-wrap font-mono text-xs text-danger" style={{ userSelect: 'text' }}>
-                {objActiveRun.error.code && <strong>{objActiveRun.error.code}: </strong>}{objActiveRun.error.message}
-              </p>
+          {/* Messages: one line per statement, in the order they ran (as dbForge's Output) */}
+          {boolMessages && (
+            <div className="h-full overflow-auto py-1.5 text-xs" style={{ userSelect: 'text' }}>
+              {arrRuns.map((objItem, intIndex) => (
+                <div key={intIndex} className="flex items-start gap-2 px-3 py-1 hover:bg-hover">
+                  <span className={`mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full text-white ${objItem.error ? 'bg-danger' : 'bg-success'}`}>
+                    {objItem.error ? <IconClose intSize={10} /> : <IconCheck intSize={11} />}
+                  </span>
+                  <span className="w-6 shrink-0 text-right tabular-nums text-muted">{intIndex + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <p>
+                      {hasGrid(objItem)
+                        ? <button type="button" className="font-mono font-semibold underline-offset-2 hover:underline" title="Show its rows" onClick={() => setIntActiveRun(intIndex)}>{runTitle(objItem.sql)}</button>
+                        : <span className="font-mono font-semibold" title={objItem.sql.slice(0, 300)}>{runTitle(objItem.sql)}</span>}
+                      <span className={objItem.error ? 'text-danger' : 'text-muted'}>
+                        {' · '}
+                        {objItem.error ? 'failed' : !objItem.result ? '' : hasGrid(objItem) ? `${objItem.result.rows.length.toLocaleString()} rows${objItem.result.truncated ? '+' : ''}`
+                          : objItem.result.recordsAffected >= 0 ? `${objItem.result.recordsAffected.toLocaleString()} row${objItem.result.recordsAffected === 1 ? '' : 's'} affected` : 'done'}
+                        {objItem.result && ` · ${objItem.result.elapsedMs.toLocaleString()} ms`}
+                      </span>
+                    </p>
+                    {objItem.error && (
+                      <p className="mt-0.5 whitespace-pre-wrap font-mono text-danger">
+                        {objItem.error.code && <strong>{objItem.error.code}: </strong>}{objItem.error.message}
+                      </p>
+                    )}
+                    {objItem.result?.messages && objItem.result.messages.length > 0 && (
+                      <pre className="mt-0.5 whitespace-pre-wrap font-mono text-muted">{objItem.result.messages.join('\n')}</pre>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {objRun.status === 'done' && objRun.skipped > 0 && (
+                <p className="px-3 py-1 pl-[3.25rem] text-danger">{objRun.skipped} {objRun.skipped === 1 ? 'statement' : 'statements'} after the error not run</p>
+              )}
             </div>
           )}
           {objRun.status === 'idle' && (
@@ -884,11 +931,23 @@ export function QueryWorkspace({
                 : `${Math.max(objActiveResult.recordsAffected, 0).toLocaleString()} rows affected`}
               {objActiveResult.truncated && ` read first (more rows exist: scroll to the end or use More rows)`}
             </span>
-            <span>{objActiveResult.elapsedMs.toLocaleString()} ms</span>
+            {objActiveRun?.clientMs === undefined || objActiveResult.executeMs == null || objActiveResult.fetchMs == null
+              ? <span>{objActiveResult.elapsedMs.toLocaleString()} ms</span>
+              : (
+                <span className="tabular-nums" title={'execute: until the database answered (first row ready)\nfetch: reading the rows from the database\napp: sending the rows to the window and parsing them\nrender: drawing the grid'}>
+                  {(objActiveRun.clientMs + (objPaint?.run === objActiveRun ? objPaint.ms : 0)).toLocaleString()} ms
+                  <span className="text-muted">
+                    {` (execute ${objActiveResult.executeMs.toLocaleString()} · fetch ${objActiveResult.fetchMs.toLocaleString()}`}
+                    {` · app ${Math.max(objActiveRun.clientMs - objActiveResult.executeMs - objActiveResult.fetchMs, 0).toLocaleString()}`}
+                    {objPaint?.run === objActiveRun && ` · render ${objPaint.ms.toLocaleString()}`})
+                  </span>
+                </span>
+              )}
           </>
         )}
-        {objActiveRun?.error && <span className="text-danger">Query failed</span>}
-        {objRun.status === 'done' && arrRuns.length > 1 && <span>Statement {intActiveRun + 1} of {arrRuns.length}</span>}
+        {boolDone && intFailed > 0 && <span className="text-danger">Query failed</span>}
+        {boolMessages && arrRuns.length > 0 && <span>{arrRuns.length - intFailed} of {arrRuns.length} {arrRuns.length === 1 ? 'statement' : 'statements'} succeeded</span>}
+        {objActiveRun && arrRuns.length > 1 && <span>Statement {intActiveRun + 1} of {arrRuns.length}</span>}
         {objRun.status === 'done' && objRun.skipped > 0 && (
           <span className="text-danger">{objRun.skipped} {objRun.skipped === 1 ? 'statement' : 'statements'} not run</span>
         )}

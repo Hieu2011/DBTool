@@ -139,7 +139,10 @@ public abstract partial class AdoProviderBase : IDbProvider
         try
         {
             objReader = await objCmd.ExecuteReaderAsync(objCancelToken);
+            var lngExecuteMs = objStopwatch.ElapsedMilliseconds;
             await ReadRowsAsync(objReader, objResult, intMaxRows, objCancelToken, objSink, intSkip: objKeep?.SkipRows ?? 0);
+            objResult.ExecuteMs = lngExecuteMs;
+            objResult.FetchMs = objStopwatch.ElapsedMilliseconds - lngExecuteMs;
         }
         finally
         {
