@@ -1,5 +1,5 @@
 /** Autocomplete for Redis consoles (language "redis"): command names at the start of a line. */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';
 import { getSnippets } from './snippets';
 

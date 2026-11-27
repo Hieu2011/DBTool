@@ -9,7 +9,7 @@
  *
  * Keep the public API (registerSqlCompletion + metadataFor) so the editor code doesn't change.
  */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import type { DbKind, SchemaMetadata, TableMeta } from '../types';
 import type { AnalyzeRequest, AnalyzeResponse, ParserDialect, ScopeTable, SqlAnalysis } from './analysis';
 import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';

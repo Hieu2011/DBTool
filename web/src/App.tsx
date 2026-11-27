@@ -15,6 +15,8 @@ import { selectAllQuery } from './sql/dialect';
 import { envVar } from './envColor';
 import { RoutineRunner } from './components/RoutineRunner';
 import { HistoryDialog } from './components/HistoryDialog';
+import { FindObjectDialog } from './components/FindObjectDialog';
+import { SessionsDialog } from './components/SessionsDialog';
 import { SnippetsDialog } from './components/SnippetsDialog';
 import { UpdateDialog } from './components/UpdateDialog';
 import { showToast } from './toast';
@@ -92,6 +94,8 @@ export default function App() {
   const [boolWordWrap, setBoolWordWrap] = useState(true);
   const toggleWordWrap = useCallback(() => setBoolWordWrap(boolPrev => !boolPrev), []);
   const [boolHistory, setBoolHistory] = useState(false);
+  const [boolFindObject, setBoolFindObject] = useState(false);
+  const [boolSessions, setBoolSessions] = useState(false);
   const [boolSnippets, setBoolSnippets] = useState(false);
   const [boolUpdate, setBoolUpdate] = useState(false);
 
@@ -132,6 +136,7 @@ export default function App() {
       if (!fnAction) return;
       // Find / Replace inside an editor is Monaco's own business (also the read-only DDL / Source views).
       if ((strKey === 'f' || strKey === 'h') && (objEvent.target as Element | null)?.closest?.('.monaco-editor')) return;
+      if (strKey === 'f' && (objEvent.target as Element | null)?.closest?.('[data-grid]')) return; // a result grid finds in itself
       // Ctrl+S in a routine's Source editor compiles it.
       if (strKey === 's' && (objEvent.target as Element | null)?.closest?.('[data-source-editor]')) return;
       objEvent.preventDefault();
@@ -471,6 +476,7 @@ export default function App() {
     'shift+s': () => { saveActiveTab(true); },
     w: () => { if (objActiveTab) closeTab(objActiveTab); },
     'shift+h': () => { if (objActiveConnection) setBoolHistory(true); },
+    'shift+o': () => { if (objActiveConnection) setBoolFindObject(true); },
     // Focus outside the editor (grid, tree): still the editor's Find / Replace.
     ...(boolQueryTab ? { f: editorAction('actions.find'), h: editorAction('editor.action.startFindReplaceAction') } : {}),
   };
@@ -523,6 +529,7 @@ export default function App() {
         { label: 'Run statement', hint: 'Ctrl+Enter', icon: <IconPlay intSize={12} />, disabled: !boolQueryTab, onSelect: () => objEditor?.run(false) },
         { label: 'Run all', hint: 'F5', disabled: !boolQueryTab, onSelect: () => objEditor?.run(true) },
         { label: 'Stop', disabled: !boolQueryTab, onSelect: () => objEditor?.stop() },
+        { label: 'Explain plan', hint: 'Ctrl+Shift+E', disabled: !boolQueryTab, onSelect: editorAction('dbstudio.explain') },
         { kind: 'separator' },
         { label: 'Commit', disabled: !boolQueryTab, onSelect: () => objEditor?.commit() },
         { label: 'Rollback', disabled: !boolQueryTab, onSelect: () => objEditor?.rollback() },
@@ -541,6 +548,9 @@ export default function App() {
           onSelect: () => { if (objActiveConnection) disconnectConnection(objActiveConnection.id); } },
         { label: 'Refresh schema', disabled: !objActiveConnection,
           onSelect: () => { if (objActiveConnection) loadMetadata(objActiveConnection.id, true).catch(() => {}); } },
+        { kind: 'separator' },
+        { label: 'Find object…', hint: 'Ctrl+Shift+O', disabled: !objActiveConnection, onSelect: () => setBoolFindObject(true) },
+        { label: 'Sessions and locks…', disabled: !objActiveConnection, onSelect: () => setBoolSessions(true) },
         { kind: 'separator' },
         { label: 'Delete this connection…', danger: true, disabled: !objActiveConnection,
           onSelect: () => { if (objActiveConnection) remove(objActiveConnection); } },
@@ -573,6 +583,11 @@ export default function App() {
           onSaved={setSnippets}
           onClose={() => setBoolSnippets(false)} />
       )}
+      {boolFindObject && objActiveConnection && (
+        <FindObjectDialog objConnection={objActiveConnection} onOpen={objObject => openObject(objActiveConnection.id, objObject)}
+          onClose={() => setBoolFindObject(false)} />
+      )}
+      {boolSessions && objActiveConnection && <SessionsDialog objConnection={objActiveConnection} onClose={() => setBoolSessions(false)} />}
       {boolHistory && objActiveConnection && (
         <HistoryDialog objConnection={objActiveConnection}
           onInsert={objEditor ? strSql => objEditor.insertText(strSql) : null}

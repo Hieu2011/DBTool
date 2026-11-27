@@ -3,7 +3,7 @@
  * under the cursor (a column leads to its table). With Ctrl held the name looks like a link.
  * Everything is disposed with the editor.
  */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import { monaco } from '../monaco';
 import type { DbObjectInfo } from '../types';
 import { objectAt } from './hover';

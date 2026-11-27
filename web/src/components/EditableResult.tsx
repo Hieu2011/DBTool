@@ -21,6 +21,13 @@ interface Props {
   /** The editor tab's session. In Manual mode the changes run in it (they stay in its transaction). */
   strSessionId?: string;
   boolAutoCommit?: boolean;
+  /** A session used only to read rows, so a cut result can stay open for scrolling (the Data tab of a table). */
+  strDataSessionId?: string;
+  /**
+   * Scrolling to the end may run the statement again when its open result is gone. Only for statements the app wrote
+   * itself: a user's statement can be slow or have side effects, so there it takes a click on "More rows".
+   */
+  boolRerunOnScroll?: boolean;
   /** Rows to read when the statement is run again (Refresh, Oracle ROWIDs). */
   intMaxRows?: number;
   /** Statements were sent on the tab's session (it may now hold an open transaction). */
@@ -57,6 +64,9 @@ const sameRows = (arrA: unknown[][], arrB: unknown[][]) =>
   arrA.length === arrB.length && arrA.every((arrRow, intRow) => JSON.stringify(arrRow) === JSON.stringify(arrB[intRow]));
 
 /** Columns of a FROM item from the loaded metadata; a bare name is looked up in the login's own schema. */
+/** "More rows" on a result that is still open on the server. */
+const FETCH_MANY_ROWS = 10000;
+
 function columnsFrom(objMeta: SchemaMetadata, objItem: FromItem) {
   if (objItem.subquery) return undefined;
   const arrParts = objItem.ref.split('.').map(upper);
@@ -71,16 +81,27 @@ function columnsFrom(objMeta: SchemaMetadata, objItem: FromItem) {
  * key (the driver says where each column comes from); Oracle by ROWID, as dbForge does: the statement's own FROM
  * clause gives the tables, and it is run again with the chosen table's ROWID when the first change needs it.
  */
-export function EditableResult({ objConnection, strSql, objResult, strSessionId, boolAutoCommit = true, intMaxRows = 1000, onRan, strExportName, onOpenSql }: Props) {
+export function EditableResult({ objConnection, strSql, objResult, strSessionId, boolAutoCommit = true, intMaxRows = 1000, onRan, strExportName, onOpenSql, strDataSessionId, boolRerunOnScroll = false }: Props) {
   // Right-click on the grid: where, and the cell under the pointer.
   const [objMenu, setObjMenu] = useState<{ x: number; y: number; row: number | null; col: number | null } | null>(null);
   // The block of cells picked in the grid (drag, Shift + click / arrows).
   const [objBlock, setObjBlock] = useState<GridBlock | null>(null);
+  // The current cell, for the Value panel (long text, JSON...).
+  const [objCell, setObjCell] = useState<{ row: number; col: number } | null>(null);
+  const [boolValuePanel, setBoolValuePanel] = useState(false);
+  // Rows asked from the server; "More rows" raises it and runs the statement again.
+  const [intLimit, setIntLimit] = useState(intMaxRows);
   // Oracle: primary key columns looked up in the catalog, once per table (null: the lookup failed).
   const refKeys = useRef(new Map<string, Promise<string[] | null>>());
   const [objEdit, setObjEdit] = useState<EditState>({ status: 'loading' });
   const [strTarget, setStrTarget] = useState<string | null>(null);
   const [objReloaded, setObjReloaded] = useState<Reloaded | null>(null);
+  // objResult with the rows read on from its open cursor (scrolling to the end).
+  const [objGrown, setObjGrown] = useState<QueryResult | null>(null);
+  const [boolFetching, setBoolFetching] = useState(false);
+  const refFetching = useRef(false);
+  const refRerunFailed = useRef(false); // scrolling stops running the statement again after an error; "More rows" still does
+  const strReadSession = strSessionId ?? strDataSessionId;
   // Pending work: cell edits of loaded rows (`row:col`), new rows (a value per result column), rows to delete.
   const [dicChanges, setDicChanges] = useState<Map<string, string | null>>(new Map());
   const [arrNew, setArrNew] = useState<(string | null)[][]>([]);
@@ -94,6 +115,19 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
   const [intCurrent, setIntCurrent] = useState<number | null>(null);
   const [objCommand, setObjCommand] = useState<{ name: GridCommand } | null>(null);
   const [boolExportMenu, setBoolExportMenu] = useState(false);
+  const refExportButton = useRef<HTMLButtonElement>(null);
+  // The menu is placed on the window (fixed): the bar it belongs to clips what sticks out of it.
+  const objExportBox = boolExportMenu ? refExportButton.current?.getBoundingClientRect() : undefined;
+  useEffect(() => {
+    if (!boolExportMenu) return;
+    const onDown = (objEvent: MouseEvent) => {
+      if (!(objEvent.target as HTMLElement).closest('[data-export-menu]')) setBoolExportMenu(false);
+    };
+    const onKey = (objEvent: KeyboardEvent) => { if (objEvent.key === 'Escape') setBoolExportMenu(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [boolExportMenu]);
   const [, setIntVersion] = useState(0); // rows are updated in place after a save: this redraws the grid
   const refStart = useRef(0); // only the latest result's check may answer
   // Oracle: table column -> what generates the key (`OWNER.SEQ.NEXTVAL`, `OWNER.TABLE_NEWID()`), looked up once per table.
@@ -124,9 +158,12 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
     const intStart = ++refStart.current;
     setStrTarget(null);
     setObjReloaded(null);
+    setObjGrown(null);
+    refRerunFailed.current = false;
     clearPending();
     setHsRows(new Set());
     setObjNote(null);
+    setIntLimit(intMaxRows);
     if (objConnection.kind === 'MongoDb') {
       const objFound = mongoTarget(strSql, objResult);
       if (typeof objFound === 'string') return setObjEdit({ status: 'unavailable', message: objFound });
@@ -155,7 +192,7 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
 
   const arrTargets = objEdit.status === 'on' ? objEdit.targets : [];
   const objTarget = arrTargets.find(objItem => objItem.key === strTarget && !objItem.reason);
-  const objShown = objReloaded?.result ?? objResult;
+  const objShown = objReloaded?.result ?? objGrown ?? objResult;
   // ROWIDs only count for the table they were read for.
   const arrRowIds = objTarget?.byRowId && objReloaded?.target === objTarget.key ? objReloaded.rowIds : undefined;
   const intBase = objShown.rows.length;
@@ -167,7 +204,7 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
   const objGrid = useMemo(() => (arrNew.length === 0 ? objShown : { ...objShown, rows: [...objShown.rows, ...arrNew] }), [objShown, arrNew]);
 
   /** Runs the statement again (for a ROWID table: with its ROWID as a last column, kept apart from the grid). */
-  const reload = async (objFor: EditTarget | undefined): Promise<Reloaded | null> => {
+  const reload = async (objFor: EditTarget | undefined, intRows = intLimit): Promise<Reloaded | null> => {
     const objParsed = objEdit.status === 'on' ? objEdit.parsed : undefined;
     const boolRowId = !!objFor?.byRowId && !!objParsed;
     const strRun = boolRowId ? rowIdSql(strSql, objParsed!, objParsed!.from[Number(objFor!.key.slice(1))]) : strSql;
@@ -177,7 +214,7 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
     }
     setBoolLoading(true);
     try {
-      const objLoaded = await api.query(crypto.randomUUID(), objConnection.id, strRun, intMaxRows, strSessionId, boolAutoCommit);
+      const objLoaded = await api.query(crypto.randomUUID(), objConnection.id, strRun, intRows, strReadSession, boolAutoCommit, true);
       if (strSessionId) onRan?.();
       if (objConnection.kind === 'MongoDb') {
         // Documents have no fixed columns: what can be edited is worked out again from the rows just read.
@@ -215,12 +252,84 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
     if (!objTarget.byRowId) return {};
     if (arrRowIds) return { rowIds: arrRowIds };
     const arrBefore = objShown.rows;
-    const objNext = await reload(objTarget);
+    const objNext = await reload(objTarget, Math.max(intLimit, arrBefore.length)); // rows read by scrolling are compared too
     if (!objNext) return null;
     if (sameRows(arrBefore, objNext.result.rows)) return { rowIds: objNext.rowIds };
     setHsRows(new Set());
     setObjNote({ text: 'The rows were read again with their ROWID and they are not the same as before. Check them, then repeat the change.', error: false });
     return null;
+  };
+
+  /** The result stopped at the row limit: the statement runs again for five times as many (the server gives 100,000 at most). */
+  const MAX_SERVER_ROWS = 100000;
+  // Reading on by running the statement again (its first rows are passed over on the server): only what reads, on
+  // the drivers that can keep a result open.
+  const boolCanRerun = (objConnection.kind === 'PostgreSql' || objConnection.kind === 'Oracle') && boolSelect && !!strReadSession;
+
+  /**
+   * Reads the next rows. From the result the session left open when it still is (nothing runs again); otherwise, when
+   * boolRerun allows it, the statement runs again from the row the grid stopped at and stays open from there.
+   * The new rows go after the loaded ones, so pending cell edits and deletions keep their row numbers; rows being
+   * added sit below and wait.
+   */
+  const fetchMore = async (intRows: number, boolRerun: boolean) => {
+    const strCursor = objShown.cursor;
+    if (!strReadSession || refFetching.current || arrNew.length > 0 || !objShown.truncated) return;
+    if (!strCursor && !(boolRerun && boolCanRerun)) return;
+    const intStart = refStart.current;
+    const objFrom = objReloaded;
+    const intColumns = objShown.columns.length;
+    const intLoaded = objShown.rows.length;
+    refFetching.current = true;
+    setBoolFetching(true);
+    try {
+      let objNext = strCursor ? await api.fetchMore(crypto.randomUUID(), strReadSession, strCursor, intRows) : null;
+      if (!objNext && boolRerun && boolCanRerun) {
+        // The statement the rows on screen came from: with the ROWID column when they were read that way.
+        const objFor = objFrom?.rowIds ? arrTargets.find(objItem => objItem.key === objFrom.target) : undefined;
+        const objParsed = objEdit.status === 'on' ? objEdit.parsed : undefined;
+        const strRun = objFrom?.rowIds ? (objFor && objParsed ? rowIdSql(strSql, objParsed, objParsed.from[Number(objFor.key.slice(1))]) : null) : strSql;
+        if (!strRun) return;
+        refRerunFailed.current = true; // cleared below once the rows are in
+        objNext = await api.query(crypto.randomUUID(), objConnection.id, strRun, intRows, strReadSession, boolAutoCommit, true, intLoaded);
+        if (strSessionId) onRan?.();
+        if (objNext.columns.length !== intColumns + (objFrom?.rowIds ? 1 : 0)) throw new Error('The statement returned other columns when it was run again.');
+        refRerunFailed.current = false;
+      }
+      if (intStart !== refStart.current) return;
+      // Null: closed on the server and not run again. The grid keeps its rows; "More rows" reads on.
+      const arrAdded = objNext?.rows ?? [];
+      const strNext = objNext?.cursor ?? null;
+      const boolTruncated = objNext ? objNext.truncated : true;
+      if (objFrom) {
+        setObjReloaded(objPrev => (objPrev !== objFrom ? objPrev : {
+          ...objPrev,
+          result: { ...objPrev.result, rows: [...objPrev.result.rows, ...(objPrev.rowIds ? arrAdded.map(arrRow => arrRow.slice(0, intColumns)) : arrAdded)], cursor: strNext, truncated: boolTruncated },
+          rowIds: objPrev.rowIds && [...objPrev.rowIds, ...arrAdded.map(arrRow => (arrRow[intColumns] === null || arrRow[intColumns] === undefined ? null : String(arrRow[intColumns])))],
+        }));
+      } else {
+        setObjGrown(objPrev => {
+          const objBase = objPrev ?? objResult;
+          return { ...objBase, rows: [...objBase.rows, ...arrAdded], cursor: strNext, truncated: boolTruncated };
+        });
+      }
+    } catch (objEx) {
+      // The tab is running something else: the next scroll asks again. Anything else is worth showing.
+      if (!(objEx instanceof ApiError && /still running/.test(objEx.detail.message))) setObjNote({ text: errorMessage(objEx), error: true });
+    } finally {
+      refFetching.current = false;
+      setBoolFetching(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (intPending > 0 && !confirm(`Discard ${plural(intPending, 'unsaved change')} and read more rows?`)) return;
+    const intNext = Math.min(Math.max(objShown.rows.length, intLimit) * 5, MAX_SERVER_ROWS);
+    setObjNote(null);
+    if (!(await reload(objTarget, intNext))) return;
+    setIntLimit(intNext);
+    clearPending();
+    setHsRows(new Set());
   };
 
   const refresh = async () => {
@@ -540,6 +649,51 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
     ];
   };
 
+  // ---- selection summary, value of the current cell ----
+  // Count of the selected cells that hold a value, and sum / average / min / max when they are all numbers.
+  const strSummary = useMemo(() => {
+    if (!objBlock) return null;
+    const intCells = objBlock.rows.length * objBlock.cols.length;
+    if (intCells < 2) return null;
+    if (intCells > 500000) return `${intCells.toLocaleString()} cells`;
+    let intCount = 0;
+    let intNumbers = 0;
+    let decSum = 0;
+    let decMin = Infinity;
+    let decMax = -Infinity;
+    for (const intRow of objBlock.rows) {
+      for (const intCol of objBlock.cols) {
+        const objValue = objGrid.rows[intRow]?.[intCol];
+        if (objValue === null || objValue === undefined || objValue === '') continue;
+        intCount++;
+        const decValue = typeof objValue === 'number' ? objValue : typeof objValue === 'string' && /^-?\d+(\.\d+)?$/.test(objValue) ? Number(objValue) : NaN;
+        if (!Number.isFinite(decValue)) continue;
+        intNumbers++;
+        decSum += decValue;
+        decMin = Math.min(decMin, decValue);
+        decMax = Math.max(decMax, decValue);
+      }
+    }
+    const format = (decValue: number) => decValue.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    return intNumbers > 0 && intNumbers === intCount
+      ? `Count ${intCount.toLocaleString()} · Sum ${format(decSum)} · Avg ${format(decSum / intCount)} · Min ${format(decMin)} · Max ${format(decMax)}`
+      : `Count ${intCount.toLocaleString()}`;
+  }, [objBlock, objGrid]);
+
+  // The current cell's whole value; JSON is laid out.
+  const objCellColumn = objCell ? objGrid.columns[objCell.col] : undefined;
+  const strCellValue = useMemo(() => {
+    if (!objCell || !objCellColumn) return null;
+    const strKey = cellKey(objCell.row, objCell.col);
+    const objValue = dicChanges.has(strKey) ? dicChanges.get(strKey) : objGrid.rows[objCell.row]?.[objCell.col];
+    if (objValue === null || objValue === undefined) return null;
+    const strText = display(objValue);
+    if (/^\s*[[{]/.test(strText)) {
+      try { return JSON.stringify(JSON.parse(strText), null, 2); } catch { /* not JSON: shown as it is */ }
+    }
+    return strText;
+  }, [objCell, objCellColumn, objGrid, dicChanges]);
+
   // ---- text ----
   const strStatus = objEdit.status === 'loading' ? 'Checking which table each column comes from…'
     : objEdit.status === 'unavailable' ? `Read-only: ${objEdit.message}`
@@ -584,12 +738,30 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
         }}>
           {objMenu && <ContextMenu intX={objMenu.x} intY={objMenu.y} arrItems={scriptItems()} onClose={() => setObjMenu(null)} />}
           {strView === 'grid' && (
-            <ResultGrid objResult={objGrid} strExportName={strExportName} objEdit={objGridEdit} hsRows={hsRows} onRows={setHsRows} onSelectRow={setIntCurrent} objReveal={objReveal}
-              objCommand={objCommand} boolNoExport onBlock={setObjBlock} />
+            <ResultGrid objResult={objGrid} strExportName={strExportName} onNearEnd={objShown.truncated && (objShown.cursor || (boolRerunOnScroll && boolCanRerun)) ? () => { void fetchMore(intMaxRows, boolRerunOnScroll && !refRerunFailed.current); } : undefined} objEdit={objGridEdit} hsRows={hsRows} onRows={setHsRows} onSelectRow={setIntCurrent} objReveal={objReveal}
+              objCommand={objCommand} boolNoExport onBlock={setObjBlock}
+              onSelectCell={(intRow, intCol) => setObjCell({ row: intRow, col: intCol })} />
           )}
           {strView === 'text' && <TextView objResult={objGrid} arrRows={arrTextRows} />}
           {strView === 'record' && <RecordView objResult={objGrid} arrRows={arrRecordRows} />}
         </div>
+        {boolValuePanel && (
+          <aside className="flex w-80 shrink-0 flex-col border-l border-line" aria-label="Cell value">
+            <div className="flex h-7 shrink-0 items-center gap-2 border-b border-line bg-bg px-2 text-xs">
+              <span className="truncate font-semibold" title={objCellColumn?.name}>{objCellColumn?.name ?? 'Value'}</span>
+              <span className="truncate text-muted">{objCellColumn?.dataType}</span>
+              {strCellValue !== null && <span className="ml-auto shrink-0 text-muted">{strCellValue.length.toLocaleString()} chars</span>}
+              <button type="button" className={`btn h-5 shrink-0 px-1.5 ${strCellValue === null ? 'ml-auto' : ''}`} disabled={strCellValue === null}
+                onClick={() => { if (strCellValue !== null) navigator.clipboard.writeText(strCellValue); }}>Copy</button>
+              <button type="button" className="icon-btn icon-btn-sm shrink-0" aria-label="Close the value panel" onClick={() => setBoolValuePanel(false)}>✕</button>
+            </div>
+            {!objCell
+              ? <p className="p-3 text-xs text-muted">Click a cell to see its whole value here.</p>
+              : strCellValue === null
+                ? <p className="p-3 text-xs italic text-muted">NULL</p>
+                : <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-2 font-mono text-xs" style={{ userSelect: 'text' }}>{strCellValue}</pre>}
+          </aside>
+        )}
       </div>
 
       {objNote && (
@@ -644,12 +816,31 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
         ))}
         <span className="toolbar-sep" />
         <div className="relative shrink-0" onBlur={objEvent => { if (!objEvent.currentTarget.contains(objEvent.relatedTarget)) setBoolExportMenu(false); }}>
-          <button className="btn h-6 px-2" aria-haspopup="menu" aria-expanded={boolExportMenu} disabled={strView !== 'grid' || objGrid.columns.length === 0}
+          <button ref={refExportButton} data-export-menu className="btn h-6 px-2" aria-haspopup="menu" aria-expanded={boolExportMenu} disabled={strView !== 'grid' || objGrid.columns.length === 0}
             onClick={() => setBoolExportMenu(boolPrev => !boolPrev)} title="Export the rows shown in the grid (after filter and sort)">
             <IconDownload intSize={13} /> Export data
           </button>
-          {boolExportMenu && (
-            <div role="menu" className="absolute bottom-full left-0 z-20 mb-1 min-w-44 rounded border border-line bg-panel py-1 text-xs shadow-lg">
+          <button className={`btn ml-1 h-6 px-2 ${boolValuePanel ? 'text-accent' : ''}`} aria-pressed={boolValuePanel} disabled={strView !== 'grid'}
+            onClick={() => setBoolValuePanel(boolPrev => !boolPrev)} title="Show the whole value of the current cell in a side panel (long text, JSON)">
+            Value
+          </button>
+          {objShown.truncated && (objShown.cursor || boolCanRerun) && (
+            <button className="btn ml-1 h-6 px-2" onClick={() => fetchMore(FETCH_MANY_ROWS, true)} disabled={boolBusy || boolFetching || arrNew.length > 0}
+              title={arrNew.length > 0 ? 'Save or cancel the new rows first: they sit below the loaded ones'
+                : objShown.cursor ? `Reads the next ${FETCH_MANY_ROWS.toLocaleString()} rows. Scrolling to the end reads the next ${intMaxRows.toLocaleString()}; the statement is not run again.`
+                : `The result is no longer open on the server: runs the statement again and reads on from row ${(objShown.rows.length + 1).toLocaleString()} (next ${FETCH_MANY_ROWS.toLocaleString()} rows). After that, scrolling reads on.`}>
+              {boolFetching ? 'Reading…' : 'More rows'}
+            </button>
+          )}
+          {boolSelect && objShown.truncated && !objShown.cursor && !boolCanRerun && intLimit < MAX_SERVER_ROWS && (
+            <button className="btn ml-1 h-6 px-2" onClick={loadMore} disabled={boolBusy}
+              title={`The result stopped at ${objShown.rows.length.toLocaleString()} rows. Runs the statement again for ${Math.min(Math.max(objShown.rows.length, intLimit) * 5, MAX_SERVER_ROWS).toLocaleString()}.`}>
+              More rows
+            </button>
+          )}
+          {boolExportMenu && objExportBox && (
+            <div role="menu" data-export-menu className="fixed z-50 min-w-44 rounded border border-line bg-panel py-1 text-xs shadow-lg"
+              style={{ left: objExportBox.left, bottom: window.innerHeight - objExportBox.top + 4 }}>
               <button type="button" role="menuitem" className="block w-full whitespace-nowrap px-3 py-1 text-left hover:bg-hover"
                 onClick={() => { setBoolExportMenu(false); setObjCommand({ name: 'xlsx' }); }}>Export to Excel (.xlsx)</button>
               <button type="button" role="menuitem" className="block w-full whitespace-nowrap px-3 py-1 text-left hover:bg-hover"
@@ -678,8 +869,11 @@ export function EditableResult({ objConnection, strSql, objResult, strSessionId,
         <span className="min-w-0 flex-1 truncate px-1 text-muted" title={strStatus}>{strStatus}</span>
         <div className="flex shrink-0 items-center gap-2 pr-1">
           {arrSummary.length > 0 && <span className="font-semibold text-env-amber">{arrSummary.join(' · ')}</span>}
+          {strSummary && <span className="text-fg" title="The selected cells">{strSummary}</span>}
           {arrPicked.length > 1 && <span className="text-muted">{arrPicked.length.toLocaleString()} selected</span>}
-          <span className="text-muted">{plural(intBase, 'row')}</span>
+          <span className="text-muted" title={objShown.cursor ? 'More rows are waiting on the server: scroll to the end' : objShown.truncated ? 'There are more rows' : undefined}>
+            {plural(intBase, 'row')}{objShown.truncated ? '+' : ''}
+          </span>
         </div>
       </div>
     </div>

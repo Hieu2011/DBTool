@@ -13,8 +13,25 @@
     <MSBuildWarningsAsMessages>MSB3277</MSBuildWarningsAsMessages>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- Help > Check for updates compares this with version.json of the update folder: raise it for every release -->
-    <Version>1.1.9</Version>
+    <Version>1.1.10</Version>
+    <!-- English only: the framework's translated resources are 17 MB the app never shows -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <!-- A self-contained WinForms app still gets the whole desktop runtime: WPF is about 40 MB nothing here loads. -->
+  <Target Name="DropWpfRuntime" AfterTargets="ResolveRuntimePackAssets">
+    <PropertyGroup>
+      <WpfOnly>^(PresentationFramework.*|PresentationCore|PresentationUI|PresentationNative_cor3|wpfgfx_cor3|D3DCompiler_47_cor3|ReachFramework|PenImc_cor3|DirectWriteForwarder|System\.Printing|System\.Windows\.Controls\.Ribbon|System\.Windows\.Presentation|System\.Windows\.Input\.Manipulations|WindowsFormsIntegration|Microsoft\.Web\.WebView2\.Wpf)$</WpfOnly>
+    </PropertyGroup>
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(WpfOnly)'))" />
+    </ItemGroup>
+  </Target>
+  <Target Name="DropWpfFiles" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(WpfOnly)'))" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <!-- shown under the author in Help > About -->

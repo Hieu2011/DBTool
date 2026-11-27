@@ -3,6 +3,21 @@
 Mỗi bản phát hành một mục, bản mới nhất ở trên. Nội dung của mục là phần ghi chú hiện trong app khi có bản mới (Help → Check for updates), nên viết ngắn gọn cho người dùng đọc.
 
 
+## 1.1.10 — 2026-11-27
+
+- Cuộn tới cuối lưới là tải tiếp các dòng kế, không chạy lại câu lệnh và không còn giới hạn 100.000 dòng (PostgreSQL, Oracle); nút More rows đọc tiếp 10.000 dòng
+- Tab Data của bảng: rời tab rồi quay lại vẫn cuộn tải tiếp được
+- Sửa lỗi nút Export data dưới lưới bấm không hiện menu Excel / CSV
+- Oracle: đọc dữ liệu nhanh hơn với bảng nhiều cột rộng và cột CLOB / BLOB
+- Hiện output của câu lệnh: DBMS_OUTPUT (Oracle), RAISE NOTICE (PostgreSQL); Oracle chạy được EXEC proc(...)
+- Câu lệnh có :tên hoặc &tên: hỏi giá trị trước khi chạy
+- Explain plan: nút Explain hoặc Ctrl+Shift+E
+- Tab Source: lỗi compile được gạch đỏ ngay tại dòng lỗi
+- Lưới: kéo đổi độ rộng cột, chuột phải tiêu đề để ghim / ẩn cột, Ctrl+F tìm trong lưới, tổng Count / Sum / Avg của vùng chọn, khung Value xem cả giá trị ô
+- Connection → Find object… (Ctrl+Shift+O): tìm bảng, view, store theo tên trên mọi schema
+- Connection → Sessions and locks…: xem session, session đang bị khoá, Kill session
+- Bản cài nhỏ hơn: 94 MB còn 69 MB
+
 ## 1.1.9 — 2026-11-26
 
 - Lưới kết quả: giữ Ctrl để chọn thêm nhiều vùng ô rời nhau, Ctrl+C chép tất cả

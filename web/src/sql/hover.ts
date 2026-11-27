@@ -5,7 +5,7 @@
  *    Oracle: parameters fetched once per routine) and the built-in functions listed below.
  * Reads names from the text with the same rules as the completion's regex fallback: no parser involved.
  */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import type { DbObjectInfo, ObjectDetail, RoutineInfo, SchemaMetadata, TableMeta } from '../types';
 import { findTable, metadataOf, tablesInQuery, unquote } from './completion';
 import { derivedTables, maskSql } from './derived';

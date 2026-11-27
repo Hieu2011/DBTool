@@ -33,7 +33,14 @@ public sealed record ConnectionDto(
 /// <summary>Without SessionId the query runs on a one-shot connection.</summary>
 public sealed record QueryRequest(
     Guid QueryId, Guid ConnectionId, string Sql, int MaxRows = 1000,
-    Guid? SessionId = null, bool AutoCommit = true);
+    Guid? SessionId = null, bool AutoCommit = true,
+    // A result cut at MaxRows stays open on the session: QueryResult.Cursor reads on (POST /query/more).
+    bool KeepOpen = false,
+    // With KeepOpen: rows to pass over first. The grid already shows them and reads on after its open result was closed.
+    int SkipRows = 0);
+
+/// <summary>The next rows of a result that was left open.</summary>
+public sealed record FetchMoreRequest(Guid QueryId, Guid SessionId, string Cursor, int MaxRows = 1000);
 
 public sealed record SessionOpenRequest(Guid ConnectionId);
 
@@ -63,6 +70,11 @@ public sealed class QueryResult
     public List<QueryResult>? More { get; set; }
     /// <summary>Document databases: row i as formatted JSON, for the JSON view. Null for SQL results.</summary>
     public List<string>? Documents { get; set; }
+    /// <summary>What the statement printed on the server (PostgreSQL notices, Oracle DBMS_OUTPUT). Null when nothing.</summary>
+    public List<string>? Messages { get; set; }
+    /// <summary>Set on a cut result the session kept open: the id that reads its next rows. Gone once another
+    /// statement runs on the session.</summary>
+    public string? Cursor { get; set; }
 }
 
 /// <summary>Error shown in the UI. Position is a 1-based character offset into the SQL, when the driver gives one.</summary>

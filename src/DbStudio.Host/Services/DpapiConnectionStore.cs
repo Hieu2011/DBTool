@@ -20,7 +20,7 @@ internal sealed class DpapiConnectionStore : IConnectionStore
 
     public DpapiConnectionStore()
     {
-        var strDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbStudio");
+        var strDir = AppPaths.DataDirectory;
         Directory.CreateDirectory(strDir);
         _strFile = Path.Combine(strDir, "connections.json");
         _lstItems = Load();

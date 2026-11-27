@@ -42,6 +42,11 @@ public abstract partial class AdoProviderBase
         CancellationToken objCancelToken, params (string Name, string? Value)[] arrParams) =>
         ExecuteOnAsync(objConn, objTransaction, strSql, intMaxRows, objCancelToken, null, arrParams);
 
+    /// <summary>RunAsync that leaves a result cut at intMaxRows open in objKeep.</summary>
+    protected Task<QueryResult> RunKeepingAsync(DbConnection objConn, DbTransaction? objTransaction, string strSql, int intMaxRows,
+        CancellationToken objCancelToken, CursorSlot? objKeep) =>
+        ExecuteOnAsync(objConn, objTransaction, strSql, intMaxRows, objCancelToken, null, [], objKeep: objKeep);
+
     /// <summary>The argument the user gave for a parameter, or null when there is none (treated as SQL NULL).</summary>
     protected static string? ArgumentFor(IReadOnlyList<RoutineArgument> lstArguments, RoutineParameter objParameter) =>
         lstArguments.FirstOrDefault(objItem => objItem.Position == objParameter.Position)?.Value;

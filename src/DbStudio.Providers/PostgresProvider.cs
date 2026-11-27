@@ -63,6 +63,20 @@ public sealed partial class PostgresProvider : AdoProviderBase
         ) t
         """;
 
+    /// <summary>RAISE NOTICE / INFO / WARNING of the running statement.</summary>
+    protected override IDisposable? CaptureMessages(DbConnection objConn, List<string> lstMessages)
+    {
+        if (objConn is not NpgsqlConnection objPgConn) return null;
+        NoticeEventHandler fnNotice = (_, objArgs) => lstMessages.Add($"{objArgs.Notice.Severity}: {objArgs.Notice.MessageText}");
+        objPgConn.Notice += fnNotice;
+        return new Unsubscribe(() => objPgConn.Notice -= fnNotice);
+    }
+
+    private sealed class Unsubscribe(Action fnDispose) : IDisposable
+    {
+        public void Dispose() => fnDispose();
+    }
+
     public override QueryError DescribeError(Exception objEx) => objEx switch
     {
         PostgresException objPgEx => new QueryError(

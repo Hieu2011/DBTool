@@ -99,6 +99,9 @@ const unixEol = (strText: string) => strText.replace(/\r\n?/g, '\n');
 
 /** A routine's code, editable: Ctrl+S compiles it. */
 type SourceHandle = { trigger: (strAction: string) => void };
+/** A compile error to underline in the code. */
+interface SourceMarker { line: number; column: number; message: string }
+const COMPILE_OWNER = 'dbstudio-compile';
 interface SourceAssist {
   connectionId: string;
   metadata: SchemaMetadata | undefined;
@@ -106,8 +109,9 @@ interface SourceAssist {
   openObject: (objObject: DbObjectInfo) => void;
 }
 
-function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, onHistory, refHandle, refAssist }: {
+function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, onHistory, refHandle, refAssist, arrMarkers }: {
   refAssist: React.MutableRefObject<SourceAssist>;
+  arrMarkers: SourceMarker[];
   strText: string; strLanguage: string; boolReadOnly: boolean; onChange: (strValue: string) => void; onSave: () => void;
   /** Whether there is something to undo / redo, after every change. */
   onHistory: (boolCanUndo: boolean, boolCanRedo: boolean) => void;
@@ -181,6 +185,21 @@ function SourceEditor({ strText, strLanguage, boolReadOnly, onChange, onSave, on
     refSetting.current = false;
     if (objView) objEditor.restoreViewState(objView);
   }, [strText]);
+
+  // Compile errors: a red underline from the reported position to the end of its word (hover shows the message).
+  useEffect(() => {
+    const objModel = refEditor.current?.getModel();
+    if (!objModel) return;
+    monaco.editor.setModelMarkers(objModel, COMPILE_OWNER, arrMarkers.filter(objItem => objItem.line >= 1 && objItem.line <= objModel.getLineCount()).map(objItem => {
+      const intColumn = Math.min(Math.max(objItem.column, 1), objModel.getLineMaxColumn(objItem.line));
+      const objWord = objModel.getWordAtPosition({ lineNumber: objItem.line, column: intColumn });
+      return {
+        severity: monaco.MarkerSeverity.Error, message: objItem.message,
+        startLineNumber: objItem.line, startColumn: intColumn, endLineNumber: objItem.line,
+        endColumn: objWord ? objWord.endColumn : Math.min(intColumn + 1, objModel.getLineMaxColumn(objItem.line)),
+      };
+    }));
+  }, [arrMarkers, strText]);
 
   const refWasReadOnly = useRef(false);
   useEffect(() => {
@@ -297,6 +316,8 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   const [boolSaving, setBoolSaving] = useState(false);
   const refSource = useRef<SourceHandle | null>(null);
   const [objHistory, setObjHistory] = useState({ undo: false, redo: false });
+  // PostgreSQL refuses the statement at the error: where it said so.
+  const [objSaveError, setObjSaveError] = useState<SourceMarker | null>(null);
   const refSaved = useRef(false); // a save just ran: the reload is silent and reports the compile errors
 
   const { schema: strSchema, name: strName, type: strType, signature: strSignature } = objObject;
@@ -346,10 +367,19 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
     : objData.status === 'done' ? `${objData.result.rows.length.toLocaleString()}+`
     : intEstimate != null ? intEstimate.toLocaleString() : null;
 
+  // The Data tab reads on its own session, so a cut result stays open and scrolling reads on.
+  const refDataSession = useRef(crypto.randomUUID());
+  useEffect(() => {
+    const strDataSession = refDataSession.current;
+    return () => { api.closeSession(strDataSession).catch(() => {}); };
+  }, []);
+
   const loadData = async () => {
     setObjData({ status: 'loading' });
     try {
-      const objResult = await api.query(crypto.randomUUID(), objConnection.id, strSelectAll, DATA_ROWS);
+      const objResult = await api.query(crypto.randomUUID(), objConnection.id, strSelectAll, DATA_ROWS, refDataSession.current, true, true);
+      // Everything fitted: no reason to hold a connection (the next read opens it again).
+      if (!objResult.cursor) api.closeSession(refDataSession.current).catch(() => {});
       setObjData({ status: 'done', result: objResult });
     } catch (objEx) {
       setObjData({ status: 'error', message: errorMessage(objEx) });
@@ -408,6 +438,25 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
   };
 
   const objDetail = objState.status === 'done' ? objState.detail : undefined;
+  // Oracle: rows of the Errors grid (part, line, position, error). Lines count from the part's own CREATE:
+  // a package body starts further down in the code shown.
+  const objErrorsGrid = objDetail?.sections.find(objItem => objItem.title === 'Errors')?.result;
+  const strShownCode = strDraft ?? objDetail?.ddl ?? '';
+  const arrSourceMarkers = useMemo(() => {
+    const arrLines = unixEol(strShownCode).split('\n');
+    const startOf = (strPart: string) => {
+      const objHeader = new RegExp(`^\\s*create\\b.*\\b${strPart.trim().replace(/\s+/g, '\\s+')}\\b`, 'i');
+      // PACKAGE also matches the PACKAGE BODY line: the first hit is the spec, as the code lists it first.
+      const intAt = arrLines.findIndex(strLine => objHeader.test(strLine) && (/\bbody\b/i.test(strPart) || !/\bbody\b/i.test(strLine)));
+      return Math.max(intAt, 0);
+    };
+    const arrFound: SourceMarker[] = (objErrorsGrid?.rows ?? []).map(arrRow => ({
+      line: startOf(String(cellOf(objErrorsGrid, arrRow, 'part') ?? '')) + Number(cellOf(objErrorsGrid, arrRow, 'line') ?? 1),
+      column: Number(cellOf(objErrorsGrid, arrRow, 'position') ?? 1),
+      message: String(cellOf(objErrorsGrid, arrRow, 'error') ?? ''),
+    }));
+    return objSaveError ? [...arrFound, objSaveError] : arrFound;
+  }, [objErrorsGrid, strShownCode, objSaveError]);
   const strSource = strDraft ?? objDetail?.ddl ?? '';
   const boolSourceDirty = strDraft !== null;
   const refOnDirtyChange = useRef(onDirtyChange);
@@ -444,7 +493,19 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
     try {
       if (boolOracle)
         await api.query(crypto.randomUUID(), objConnection.id, `ALTER SESSION SET CURRENT_SCHEMA = "${strSchema.replace(/"/g, '')}"`, 1, strSessionId);
-      for (const objStatement of arrStatements) await api.query(crypto.randomUUID(), objConnection.id, objStatement.text, 1, strSessionId);
+      setObjSaveError(null);
+      for (const objStatement of arrStatements) {
+        try {
+          await api.query(crypto.randomUUID(), objConnection.id, objStatement.text, 1, strSessionId);
+        } catch (objEx) {
+          // The driver's position counts from the start of the statement.
+          if (objEx instanceof ApiError && objEx.detail.position) {
+            const arrBefore = unixEol(strDraft).slice(0, objStatement.start + objEx.detail.position - 1).split('\n');
+            setObjSaveError({ line: arrBefore.length, column: arrBefore[arrBefore.length - 1].length + 1, message: objEx.detail.message });
+          }
+          throw objEx;
+        }
+      }
       refSaved.current = true;
       setIntReload(intPrev => intPrev + 1);
     } catch (objEx) {
@@ -491,6 +552,8 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
     [objFieldsGrid]);
 
   const openTab = (strTab: string) => {
+    // Leaving Data closes its open result: on PostgreSQL it holds a lock that would block an ALTER of this table.
+    if (strTab !== DATA_TAB) api.closeSession(refDataSession.current).catch(() => {});
     setStrActive(strTab);
     if (strTab === DATA_TAB && objData.status === 'idle') loadData();
   };
@@ -642,8 +705,8 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                 {strShown === SOURCE_TAB && (objDetail.ddl
                   ? (
                     <SourceEditor strText={strSource} strLanguage={editorLanguage(objConnection.kind)} boolReadOnly={boolSaving}
-                      refHandle={refSource} refAssist={refAssist} onHistory={(boolUndo, boolRedo) => setObjHistory(objPrev => (objPrev.undo === boolUndo && objPrev.redo === boolRedo ? objPrev : { undo: boolUndo, redo: boolRedo }))}
-                      onChange={strValue => setStrDraft(unixEol(strValue) === unixEol(objDetail.ddl ?? '') ? null : strValue)} onSave={saveSource} />
+                      refHandle={refSource} refAssist={refAssist} arrMarkers={arrSourceMarkers} onHistory={(boolUndo, boolRedo) => setObjHistory(objPrev => (objPrev.undo === boolUndo && objPrev.redo === boolRedo ? objPrev : { undo: boolUndo, redo: boolRedo }))}
+                      onChange={strValue => { setObjSaveError(null); setStrDraft(unixEol(strValue) === unixEol(objDetail.ddl ?? '') ? null : strValue); }} onSave={saveSource} />
                   )
                   : (
                     <p className="whitespace-pre-wrap p-4 text-muted" style={{ userSelect: 'text' }}>
@@ -709,12 +772,12 @@ export function ObjectViewer({ objConnection, objObject, boolActive, objMetadata
                       <div className="flex h-full flex-col">
                         <div className="min-h-0 flex-1">
                           {TABLE_LIKE.has(strType)
-                            ? <EditableResult objConnection={objConnection} strSql={strSelectAll} objResult={objData.result} intMaxRows={DATA_ROWS} strExportName={`${strSchema}.${strName}`} onOpenSql={strScript => onOpenSql(strScript, false)} />
+                            ? <EditableResult objConnection={objConnection} strSql={strSelectAll} objResult={objData.result} strDataSessionId={refDataSession.current} boolRerunOnScroll intMaxRows={DATA_ROWS} strExportName={`${strSchema}.${strName}`} onOpenSql={strScript => onOpenSql(strScript, false)} />
                             : <ResultGrid objResult={objData.result} strExportName={`${strSchema}.${strName}`} />}
                         </div>
                         <div className="shrink-0 border-t border-line bg-bg px-3 py-0.5 text-xs text-muted">
                           {objData.result.rows.length.toLocaleString()} rows
-                          {objData.result.truncated && ` (first ${DATA_ROWS.toLocaleString()} only; use Open data for more)`}
+                          {objData.result.truncated && (TABLE_LIKE.has(strType) && (objConnection.kind === 'PostgreSql' || objConnection.kind === 'Oracle') ? ' read first; scroll to the end for more' : ` (first ${DATA_ROWS.toLocaleString()} only; use Open data for more)`)}
                         </div>
                       </div>
                     )}

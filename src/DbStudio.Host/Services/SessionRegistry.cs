@@ -18,10 +18,48 @@ internal sealed class SessionRegistry : IAsyncDisposable
         public IDbSession? Session { get; set; }
     }
 
+    // An open result keeps a statement (on PostgreSQL: a snapshot and a table lock) alive on the server.
+    private static readonly TimeSpan CursorIdleLimit = TimeSpan.FromMinutes(5);
+
     private readonly ConcurrentDictionary<Guid, Entry> _dicSessions = new();
+    private readonly System.Threading.Timer _objSweeper;
+
+    public SessionRegistry() =>
+        _objSweeper = new System.Threading.Timer(_ => _ = CloseIdleCursorsAsync(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+
+    /// <summary>Results nobody scrolled for a while are closed; the grid then offers to run the statement again.</summary>
+    private async Task CloseIdleCursorsAsync()
+    {
+        foreach (var objEntry in _dicSessions.Values)
+        {
+            if (objEntry.Session is not IResumableSession { CursorUsedUtc: { } dtUsed } || DateTime.UtcNow - dtUsed < CursorIdleLimit) continue;
+            if (!await objEntry.Gate.WaitAsync(0, CancellationToken.None)) continue; // busy: looked at again next minute
+            try { if (objEntry.Session is IResumableSession objSession) await objSession.CloseCursorAsync(); }
+            catch { /* the sweep must never bring the app down */ }
+            finally { objEntry.Gate.Release(); }
+        }
+    }
+
+    /// <summary>Null when the session or that open result is gone.</summary>
+    public async Task<QueryResult?> FetchMoreAsync(Guid guidSessionId, string strCursor, int intMaxRows, CancellationToken objCancelToken)
+    {
+        if (!_dicSessions.TryGetValue(guidSessionId, out var objEntry)) return null;
+        if (!await objEntry.Gate.WaitAsync(0, CancellationToken.None)) throw new InvalidOperationException(BusyMessage);
+        try
+        {
+            if (objEntry.Session is not IResumableSession objSession) return null;
+            using var objLinked = CancellationTokenSource.CreateLinkedTokenSource(objCancelToken, objEntry.Closed.Token);
+            return await objSession.FetchMoreAsync(strCursor, intMaxRows, objLinked.Token);
+        }
+        finally
+        {
+            objEntry.Gate.Release();
+        }
+    }
 
     public async Task<QueryResult> ExecuteAsync(Guid guidSessionId, ConnectionProfile objProfile, IDbProvider objProvider,
-        string strSql, int intMaxRows, bool boolAutoCommit, CancellationToken objCancelToken, IRowSink? objSink = null)
+        string strSql, int intMaxRows, bool boolAutoCommit, CancellationToken objCancelToken, IRowSink? objSink = null,
+        bool boolKeepOpen = false, int intSkipRows = 0)
     {
         var objEntry = _dicSessions.GetOrAdd(guidSessionId, _ => new Entry(objProfile.Id));
         if (!await objEntry.Gate.WaitAsync(0, CancellationToken.None)) throw new InvalidOperationException(BusyMessage);
@@ -30,7 +68,12 @@ internal sealed class SessionRegistry : IAsyncDisposable
             objEntry.Closed.Token.ThrowIfCancellationRequested();
             using var objLinked = CancellationTokenSource.CreateLinkedTokenSource(objCancelToken, objEntry.Closed.Token);
             objEntry.Session ??= await objProvider.OpenSessionAsync(objProfile, objLinked.Token);
-            return await objEntry.Session.ExecuteAsync(strSql, intMaxRows, boolAutoCommit, objLinked.Token, objSink);
+            // Without the skip the caller would get the rows it already has.
+            if (intSkipRows > 0 && !(boolKeepOpen && objEntry.Session is IResumableSession))
+                throw new NotSupportedException("This kind of connection cannot read on from a row offset.");
+            return boolKeepOpen && objEntry.Session is IResumableSession objResumable
+                ? await objResumable.ExecuteKeepingAsync(strSql, intMaxRows, boolAutoCommit, objLinked.Token, objSink, intSkipRows)
+                : await objEntry.Session.ExecuteAsync(strSql, intMaxRows, boolAutoCommit, objLinked.Token, objSink);
         }
         finally
         {
@@ -86,6 +129,7 @@ internal sealed class SessionRegistry : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await _objSweeper.DisposeAsync();
         foreach (var guidSessionId in _dicSessions.Keys.ToList())
             await CloseAsync(guidSessionId);
     }

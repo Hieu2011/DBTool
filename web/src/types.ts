@@ -27,10 +27,14 @@ export interface QueryResult {
   recordsAffected: number;
   truncated: boolean;
   elapsedMs: number;
+  /** A cut result the tab's session kept open: api.fetchMore reads its next rows. */
+  cursor?: string | null;
   /** Further result sets of the same statement (it returned several cursors). */
   more?: QueryResult[] | null;
   /** Document databases: row i as formatted JSON, for the JSON view. */
   documents?: string[] | null;
+  /** What the statement printed on the server (PostgreSQL notices, Oracle DBMS_OUTPUT). */
+  messages?: string[] | null;
 }
 
 /** A file the server wrote into the Downloads folder. truncated: the format's row limit cut the data (Excel: 1,048,576 rows). */

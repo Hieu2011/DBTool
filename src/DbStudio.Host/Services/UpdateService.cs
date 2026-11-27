@@ -50,7 +50,7 @@ internal sealed partial class UpdateService
 
     public UpdateService()
     {
-        var strDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbStudio");
+        var strDir = AppPaths.DataDirectory;
         Directory.CreateDirectory(strDir);
         _strFile = Path.Combine(strDir, "update.json");
         // The exe replaced by the last update: it could not be deleted while it was still running.

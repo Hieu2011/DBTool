@@ -61,22 +61,30 @@ public sealed partial class PostgresProvider
     // Auto-commit closes a refcursor as soon as the SELECT ends, so a SELECT that returns
     // only refcursors is run in a short transaction and answered with the cursors' rows.
     protected override async Task<QueryResult> ExecuteAutoCommitAsync(DbConnection objConn, string strSql, int intMaxRows,
-        CancellationToken objCancelToken, IRowSink? objSink = null)
+        CancellationToken objCancelToken, IRowSink? objSink = null, CursorSlot? objKeep = null)
     {
-        if (!SelectCall.IsMatch(strSql)) return await base.ExecuteAutoCommitAsync(objConn, strSql, intMaxRows, objCancelToken, objSink);
+        if (!SelectCall.IsMatch(strSql)) return await base.ExecuteAutoCommitAsync(objConn, strSql, intMaxRows, objCancelToken, objSink, objKeep);
 
         DbTransaction objTransaction;
         try { objTransaction = await objConn.BeginTransactionAsync(objCancelToken); }
         catch (InvalidOperationException)
         {
             // The user opened a transaction in SQL (BEGIN): leave it alone, the cursor lives in it.
-            return await base.ExecuteAutoCommitAsync(objConn, strSql, intMaxRows, objCancelToken, objSink);
+            return await base.ExecuteAutoCommitAsync(objConn, strSql, intMaxRows, objCancelToken, objSink, objKeep);
         }
 
         // Not streamed: the rows may be cursor names that are swapped for the cursors' data below.
-        await using (objTransaction)
+        var boolKept = false;
+        try
         {
-            var objResult = await RunAsync(objConn, objTransaction, strSql, intMaxRows, objCancelToken);
+            var objResult = await RunKeepingAsync(objConn, objTransaction, strSql, intMaxRows, objCancelToken, objKeep);
+            if (objKeep is { Reader: not null })
+            {
+                // Cut and left open: the transaction lives as long as the result does.
+                objKeep.Transaction = objTransaction;
+                boolKept = true;
+                return objResult;
+            }
             if (objResult.Columns.Count > 0 && objResult.Columns.All(objColumn => objColumn.DataType == "refcursor") && !objResult.Truncated)
             {
                 var lstGrids = new List<QueryResult>();
@@ -91,6 +99,10 @@ public sealed partial class PostgresProvider
             // After a truncated read the transaction is aborted and this ends as a rollback, same as a cancelled statement.
             await objTransaction.CommitAsync(objCancelToken);
             return objResult;
+        }
+        finally
+        {
+            if (!boolKept) await objTransaction.DisposeAsync();
         }
     }
 

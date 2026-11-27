@@ -26,7 +26,7 @@ internal sealed class SettingsStore
 
     public SettingsStore()
     {
-        var strDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbStudio");
+        var strDir = AppPaths.DataDirectory;
         Directory.CreateDirectory(strDir);
         _strFile = Path.Combine(strDir, "settings.json");
     }

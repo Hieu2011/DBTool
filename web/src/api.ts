@@ -151,21 +151,34 @@ export const api = {
       }),
     }),
 
+  /**
+   * boolKeepOpen (needs a session): a result cut at intMaxRows stays open, its `cursor` reads on with fetchMore.
+   * intSkipRows (with boolKeepOpen): the statement runs again and its first rows are passed over on the server.
+   */
   query: (strQueryId: string, strConnectionId: string, strSql: string, intMaxRows = 1000,
-    strSessionId?: string, boolAutoCommit = true) =>
+    strSessionId?: string, boolAutoCommit = true, boolKeepOpen = false, intSkipRows = 0) =>
     request<QueryResult>('/query', {
       method: 'POST',
       body: JSON.stringify({
         queryId: strQueryId, connectionId: strConnectionId, sql: strSql, maxRows: intMaxRows,
-        sessionId: strSessionId, autoCommit: boolAutoCommit,
+        sessionId: strSessionId, autoCommit: boolAutoCommit, keepOpen: boolKeepOpen, skipRows: intSkipRows,
       }),
+    }),
+  /** The next rows of a result left open. Null: it was closed (another statement ran, or nobody read it for a while). */
+  fetchMore: (strQueryId: string, strSessionId: string, strCursor: string, intMaxRows: number) =>
+    request<QueryResult>('/query/more', {
+      method: 'POST',
+      body: JSON.stringify({ queryId: strQueryId, sessionId: strSessionId, cursor: strCursor, maxRows: intMaxRows }),
+    }).catch((objEx): QueryResult | null => {
+      if (objEx instanceof ApiError && objEx.detail.code === 'CursorClosed') return null;
+      throw objEx;
     }),
   /** api.query for the editor: the grid can show rows while the statement is still being read. */
   queryStream: (strQueryId: string, strConnectionId: string, strSql: string, intMaxRows: number,
-    strSessionId: string | undefined, boolAutoCommit: boolean, onProgress?: (objPartial: QueryResult) => void) =>
+    strSessionId: string | undefined, boolAutoCommit: boolean, onProgress?: (objPartial: QueryResult) => void, boolKeepOpen = false) =>
     queryStream({
       queryId: strQueryId, connectionId: strConnectionId, sql: strSql, maxRows: intMaxRows,
-      sessionId: strSessionId, autoCommit: boolAutoCommit,
+      sessionId: strSessionId, autoCommit: boolAutoCommit, keepOpen: boolKeepOpen,
     }, onProgress),
   /** Which table each column of a SELECT comes from (the statement is described, not run). */
   describeResult: (strConnectionId: string, strSql: string) =>

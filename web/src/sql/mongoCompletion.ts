@@ -3,7 +3,7 @@
  * collection, modifiers after a call, and inside the arguments the fields sampled from the
  * collection plus the query / update / pipeline operators.
  */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import { metadataOf } from './completion';
 import { builtinSnippets, snippetCode, snippetLabel } from './builtinSnippets';
 import { getSnippets } from './snippets';

@@ -1,4 +1,5 @@
-import * as monaco from 'monaco-editor';
+import * as monaco from 'monaco-editor/editor/editor.api.js';
+import './monacoContrib';
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 
 // Load Monaco from the bundle (no CDN): the app must work offline.

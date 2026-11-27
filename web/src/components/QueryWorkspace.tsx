@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import { monaco } from '../monaco';
 import { api, ApiError } from '../api';
 import { showToast } from '../toast';
@@ -10,6 +10,8 @@ import { foldByStatement, registerSqlFolding } from '../sql/folding';
 import { registerMongoCompletion } from '../sql/mongoCompletion';
 import { columnDetailsFor, registerSqlHover, routinesFor } from '../sql/hover';
 import { attachAltClickCursor, attachObjectLinks } from '../sql/objectLinks';
+import { findVariables, substituteVariables } from '../sql/bindVariables';
+import { BindDialog } from './BindDialog';
 import { formatSql, isUnfilteredWrite } from '../sql/format';
 import { splitStatements, statementAt } from '../sql/statements';
 import type { Connection, DbObjectInfo, QueryError, QueryResult, SchemaMetadata } from '../types';
@@ -165,6 +167,10 @@ export function QueryWorkspace({
   const [strSession, setStrSession] = useState<SessionState>('closed');
   const refOpening = useRef<Promise<void> | null>(null);
   const refCursor = useRef<HTMLSpanElement>(null);
+  // :name / &name of the statements about to run: asked in a dialog, remembered for the next run of this tab.
+  const [objAsk, setObjAsk] = useState<{ variables: { name: string; raw: boolean }[]; done: (dicValues: Map<string, string> | null) => void } | null>(null);
+  const refBindValues = useRef(new Map<string, string>());
+  const refExplain = useRef<() => void>(() => {});
   const [boolCanUndo, setBoolCanUndo] = useState(false);
   const [boolCanRedo, setBoolCanRedo] = useState(false);
 
@@ -260,6 +266,14 @@ export function QueryWorkspace({
     objEditor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => refOnToggleWordWrap.current());
     objEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => refRun.current(false));
     objEditor.addCommand(monaco.KeyCode.F5, () => refRun.current(true));
+    objEditor.addAction({
+      id: 'dbstudio.explain',
+      label: 'Explain plan',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 2,
+      run: () => refExplain.current(),
+    });
     // Formats the selection, or the whole editor. One edit, so one Ctrl+Z brings the text back.
     objEditor.addAction({
       id: FORMAT_ACTION,
@@ -370,6 +384,64 @@ export function QueryWorkspace({
    * the cursor, or every statement in the editor with boolAll. One request per statement,
    * in order, stopping at the first error.
    */
+  /** Replaces the variables of the statements by values asked from the user. Null: cancelled. */
+  const withVariables = async <T extends { text: string }>(arrItems: T[]): Promise<T[] | null> => {
+    if (!boolSql) return arrItems;
+    const boolOracle = objConnection.kind === 'Oracle';
+    const arrFound = arrItems.map(objItem => findVariables(objItem.text, boolOracle));
+    const dicNames = new Map<string, { name: string; raw: boolean }>();
+    for (const objVariable of arrFound.flat()) if (!dicNames.has(objVariable.name.toUpperCase())) dicNames.set(objVariable.name.toUpperCase(), { name: objVariable.name, raw: objVariable.raw });
+    if (dicNames.size === 0) return arrItems;
+    const dicValues = await new Promise<Map<string, string> | null>(fnResolve => setObjAsk({ variables: [...dicNames.values()], done: fnResolve }));
+    setObjAsk(null);
+    refEditor.current?.focus();
+    if (!dicValues) return null;
+    for (const [strName, strValue] of dicValues) refBindValues.current.set(strName, strValue);
+    return arrItems.map((objItem, intIndex) => ({ ...objItem, text: substituteVariables(objItem.text, arrFound[intIndex], dicValues, boolOracle) }));
+  };
+
+  /** The plan of the statement under the cursor (or of the selection). Nothing is executed: EXPLAIN without ANALYZE. */
+  const explain = async () => {
+    const objEditor = refEditor.current;
+    const objModel = objEditor?.getModel();
+    if (!objEditor || !objModel || !boolSql || objRun.status === 'running') return;
+    const objSelection = objEditor.getSelection();
+    const boolUseSelection = !!objSelection && !objSelection.isEmpty();
+    const strSource = boolUseSelection ? objModel.getValueInRange(objSelection) : objModel.getValue();
+    const arrAll = splitStatements(strSource, dialectOf(objConnection.kind));
+    const objPosition = objEditor.getPosition();
+    const objPicked = boolUseSelection ? arrAll[0] : statementAt(arrAll, strSource, objPosition ? objModel.getOffsetAt(objPosition) : 0);
+    const arrReady = objPicked ? await withVariables([objPicked]) : null;
+    if (!arrReady) return;
+    const strText = arrReady[0].text;
+
+    setStrPane(strPrev => (strPrev === 'editor' ? 'both' : strPrev));
+    const strQueryId = crypto.randomUUID();
+    setObjLive(null);
+    setObjRun({ status: 'running', queryId: strQueryId, startedAt: Date.now(), index: 0, total: 1 });
+    setLngNow(Date.now());
+    await refOpening.current;
+    const strTitle = `EXPLAIN ${strText}`;
+    try {
+      let objPlan: QueryResult;
+      if (objConnection.kind === 'Oracle') {
+        // Both on the tab's session: the plan table is read by the session that filled it.
+        await api.query(strQueryId, objConnection.id, `EXPLAIN PLAN FOR ${strText}`, 1, strSessionId, boolAutoCommit);
+        objPlan = await api.query(crypto.randomUUID(), objConnection.id, 'SELECT plan_table_output AS "PLAN" FROM TABLE(DBMS_XPLAN.DISPLAY())', 5000, strSessionId, boolAutoCommit);
+      } else {
+        objPlan = await api.query(strQueryId, objConnection.id, `EXPLAIN ${strText}`, 5000, strSessionId, boolAutoCommit);
+      }
+      setArrRuns([{ sql: strTitle, result: objPlan }]);
+      setStrSession('open');
+      if (!boolAutoCommit) setBoolTxOpen(true);
+    } catch (objEx) {
+      setArrRuns([{ sql: strTitle, error: toQueryError(objEx) }]);
+    }
+    setIntActiveRun(0);
+    setObjRun({ status: 'done', skipped: 0 });
+  };
+  refExplain.current = explain;
+
   const execute = async (boolAll: boolean) => {
     const objEditor = refEditor.current;
     const objModel = objEditor?.getModel();
@@ -387,6 +459,10 @@ export function QueryWorkspace({
       arrStatements = objStatement ? [objStatement] : [];
     }
     if (arrStatements.length === 0) return;
+    // :name / &name get their values first (the statement is sent with them written in).
+    const arrWithValues = await withVariables(arrStatements);
+    if (!arrWithValues) return;
+    arrStatements = arrWithValues;
 
     // Red = production: an UPDATE / DELETE without WHERE asks first.
     const strDialect = dialectOf(objConnection.kind);
@@ -425,7 +501,9 @@ export function QueryWorkspace({
             if (Date.now() - lngShownAt < LIVE_REFRESH_MS) return;
             lngShownAt = Date.now();
             setObjLive({ ...objPartial, rows: objPartial.rows.slice() });
-          });
+          },
+          // Only the last statement can stay open for scrolling: the next one would close it.
+          intIndex === arrStatements.length - 1);
         api.addHistory(objConnection.id, objStatement.text, objResult.elapsedMs,
           objResult.columns.length > 0 ? objResult.rows.length : objResult.recordsAffected >= 0 ? objResult.recordsAffected : null,
           null).catch(() => {});
@@ -574,6 +652,11 @@ export function QueryWorkspace({
         <button className={`icon-btn ${boolRunning ? 'text-danger' : ''}`} onClick={stop} disabled={!boolRunning}
           aria-label="Stop" title="Stop the running statement">
           <IconStop intSize={14} />
+        </button>
+
+        <button className={`icon-btn ${boolSql ? '' : 'hidden'}`} onClick={explain} disabled={boolRunning}
+          title="Show the execution plan of the statement under the cursor, without running it (Ctrl+Shift+E)">
+          Explain
         </button>
 
         <span className="toolbar-sep" />
@@ -730,6 +813,14 @@ export function QueryWorkspace({
           </div>
         )}
 
+        {/* what the statement printed: DBMS_OUTPUT, RAISE NOTICE */}
+        {objActiveResult?.messages && objActiveResult.messages.length > 0 && (
+          <div className="flex max-h-40 shrink-0 gap-3 overflow-auto border-b border-line bg-bg px-3 py-1.5 text-xs">
+            <span className="shrink-0 font-semibold text-muted">Output</span>
+            <pre className="min-w-0 flex-1 whitespace-pre-wrap font-mono" style={{ userSelect: 'text' }}>{objActiveResult.messages.join('\n')}</pre>
+          </div>
+        )}
+
         <div className="min-h-0 flex-1">
           {objActiveResult && objActiveResult.columns.length > 0 && (
             <div className="flex h-full flex-col">
@@ -775,6 +866,8 @@ export function QueryWorkspace({
         </div>
       </div>
 
+      {objAsk && <BindDialog arrVariables={objAsk.variables} dicLast={refBindValues.current} onDone={objAsk.done} />}
+
       {/* status bar */}
       <footer className="flex h-6 shrink-0 items-center gap-4 border-t border-line bg-bg px-3 text-xs text-muted">
         {objRun.status === 'running' && (
@@ -789,7 +882,7 @@ export function QueryWorkspace({
               {objActiveResult.columns.length > 0
                 ? `${objActiveResult.rows.length.toLocaleString()} rows`
                 : `${Math.max(objActiveResult.recordsAffected, 0).toLocaleString()} rows affected`}
-              {objActiveResult.truncated && ` (stopped at ${intMaxRows.toLocaleString()}, more rows exist)`}
+              {objActiveResult.truncated && ` read first (more rows exist: scroll to the end or use More rows)`}
             </span>
             <span>{objActiveResult.elapsedMs.toLocaleString()} ms</span>
           </>

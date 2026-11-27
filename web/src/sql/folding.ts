@@ -3,7 +3,7 @@
  * and indentation blocks inside it still fold on their own.
  * Other models (DDL viewer) return null and keep Monaco's indentation folding.
  */
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/editor/editor.api.js';
 import { splitStatements } from './statements';
 
 /** 1-based, inclusive lines. */

@@ -23,7 +23,7 @@ internal sealed class HistoryStore
 
     public HistoryStore()
     {
-        var strDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbStudio");
+        var strDir = AppPaths.DataDirectory;
         Directory.CreateDirectory(strDir);
         _strFile = Path.Combine(strDir, "history.json");
     }

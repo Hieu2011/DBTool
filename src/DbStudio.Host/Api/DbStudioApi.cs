@@ -298,7 +298,8 @@ internal static class DbStudioApi
                 var intMaxRows = Math.Clamp(objRequest.MaxRows, 1, 100_000);
                 var objProvider = objProviders.Get(objProfile.Kind);
                 var objResult = objRequest.SessionId is { } guidSessionId
-                    ? await objSessions.ExecuteAsync(guidSessionId, objProfile, objProvider, objRequest.Sql, intMaxRows, objRequest.AutoCommit, objCts.Token)
+                    ? await objSessions.ExecuteAsync(guidSessionId, objProfile, objProvider, objRequest.Sql, intMaxRows, objRequest.AutoCommit, objCts.Token,
+                        boolKeepOpen: objRequest.KeepOpen, intSkipRows: objRequest.SkipRows)
                     : await objProvider.ExecuteAsync(objProfile, objRequest.Sql, intMaxRows, objCts.Token);
                 return Results.Ok(objResult);
             }
@@ -309,6 +310,32 @@ internal static class DbStudioApi
             catch (Exception objEx)
             {
                 return Results.BadRequest(Describe(objProviders, objProfile.Kind, objEx));
+            }
+            finally
+            {
+                objQueries.End(objRequest.QueryId);
+            }
+        });
+
+        // The next rows of a result a session kept open (QueryResult.Cursor). 410 + code CursorClosed: it is gone, the
+        // UI falls back to running the statement again.
+        objApi.MapPost("/query/more", async (FetchMoreRequest objRequest, QueryRegistry objQueries, SessionRegistry objSessions, HttpContext objHttp) =>
+        {
+            using var objCts = objQueries.Begin(objRequest.QueryId, objHttp.RequestAborted);
+            try
+            {
+                var objResult = await objSessions.FetchMoreAsync(objRequest.SessionId, objRequest.Cursor, Math.Clamp(objRequest.MaxRows, 1, 100_000), objCts.Token);
+                return objResult is null
+                    ? Results.Json(new QueryError("The result is no longer open.", null, "CursorClosed"), statusCode: StatusCodes.Status410Gone)
+                    : Results.Ok(objResult);
+            }
+            catch (Exception) when (objCts.IsCancellationRequested)
+            {
+                return Results.Json(new QueryError("Query cancelled."), statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (Exception objEx)
+            {
+                return Results.BadRequest(new QueryError(objEx.Message));
             }
             finally
             {
@@ -338,7 +365,8 @@ internal static class DbStudioApi
                 var intMaxRows = Math.Clamp(objRequest.MaxRows, 1, 100_000);
                 var objProvider = objProviders.Get(objProfile.Kind);
                 var objResult = objRequest.SessionId is { } guidSessionId
-                    ? await objSessions.ExecuteAsync(guidSessionId, objProfile, objProvider, objRequest.Sql, intMaxRows, objRequest.AutoCommit, objCts.Token, objSink)
+                    ? await objSessions.ExecuteAsync(guidSessionId, objProfile, objProvider, objRequest.Sql, intMaxRows, objRequest.AutoCommit, objCts.Token, objSink,
+                        objRequest.KeepOpen)
                     : await objProvider.ExecuteAsync(objProfile, objRequest.Sql, intMaxRows, objCts.Token, objSink);
                 objLast = new { t = "done", result = objResult, streamed = objSink.Started };
             }

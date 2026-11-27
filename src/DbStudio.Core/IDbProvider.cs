@@ -69,6 +69,24 @@ public interface IDbSession : IAsyncDisposable
     Task RollbackAsync(CancellationToken objCancelToken);
 }
 
+/// <summary>A session that can leave a cut result open and read on from it, instead of running the statement again.</summary>
+public interface IResumableSession
+{
+    /// <summary>When the open result was last read; null when none is open.</summary>
+    DateTime? CursorUsedUtc { get; }
+
+    /// <summary>As ExecuteAsync; a result cut at intMaxRows stays open and carries QueryResult.Cursor.
+    /// intSkipRows: the first rows are read and dropped (the caller has them from an earlier run).</summary>
+    Task<QueryResult> ExecuteKeepingAsync(string strSql, int intMaxRows, bool boolAutoCommit, CancellationToken objCancelToken,
+        IRowSink? objSink = null, int intSkipRows = 0);
+
+    /// <summary>The next rows (Columns stays empty). Null when that result is no longer open.</summary>
+    Task<QueryResult?> FetchMoreAsync(string strCursor, int intMaxRows, CancellationToken objCancelToken);
+
+    /// <summary>Never throws.</summary>
+    Task CloseCursorAsync();
+}
+
 public interface IConnectionStore
 {
     IReadOnlyList<ConnectionProfile> List();
